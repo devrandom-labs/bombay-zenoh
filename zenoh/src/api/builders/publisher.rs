@@ -18,6 +18,8 @@ use zenoh_protocol::core::CongestionControl;
 #[cfg(feature = "unstable")]
 use zenoh_protocol::core::Reliability;
 
+#[cfg(any(feature = "internal", feature = "unstable"))]
+use crate::api::builders::sample::TimestampInstrumentationBuilderTrait;
 #[cfg(feature = "unstable")]
 use crate::api::sample::SourceInfo;
 #[cfg(feature = "unstable")]
@@ -26,7 +28,6 @@ use crate::{
     api::{
         builders::sample::{
             EncodingBuilderTrait, QoSBuilderTrait, SampleBuilderTrait, TimestampBuilderTrait,
-            TimestampInstrumentationBuilderTrait,
         },
         bytes::{OptionZBytes, ZBytes},
         cancellation::SyncGroup,
@@ -215,6 +216,7 @@ impl<P, T> SampleBuilderTrait for PublicationBuilder<P, T> {
     }
 }
 
+#[cfg(any(feature = "internal", feature = "unstable"))]
 #[zenoh_macros::internal_trait]
 impl<P, T> TimestampInstrumentationBuilderTrait for PublicationBuilder<P, T> {
     #[zenoh_macros::unstable]

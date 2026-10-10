@@ -18,14 +18,12 @@ description = "Internal crate for zenoh."
 edition = { workspace = true }
 homepage = { workspace = true }
 license = { workspace = true }
-name = "zenoh-link-tls"
+license-file = { workspace = true }
+name = "bombay-zenoh-link-tls"
 repository = { workspace = true }
 rust-version = { workspace = true }
 version = { workspace = true }
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[features]
-uring = []
 
 [dependencies]
 async-trait = { workspace = true }
@@ -53,3 +51,17 @@ zenoh-runtime = { workspace = true }
 
 [package.metadata.cargo-machete]
 ignored = ["rustls-webpki"]
+
+[lib]
+name = "zenoh_link_tls"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(feature, values("uring"))',
+] }
+
+[package.metadata.bombay]
+upstream-repository = "https://github.com/eclipse-zenoh/zenoh"
+upstream-revision = "1211779c3647f5a96713dade452c546a07823580"
+controlled-repository = "https://github.com/devrandom-labs/bombay-zenoh"
+supported-profile = "tls-only"

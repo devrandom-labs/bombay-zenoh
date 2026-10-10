@@ -18,46 +18,22 @@ description = "Internal crate for zenoh."
 edition = { workspace = true }
 homepage = { workspace = true }
 license = { workspace = true }
-name = "zenoh-link-commons"
+license-file = { workspace = true }
+name = "bombay-zenoh-link-commons"
 repository = { workspace = true }
 rust-version = { workspace = true }
 version = { workspace = true }
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-compression = []
-quic = [
-  "dep:base64",
-  "dep:bytes",
-  "dep:quinn",
-  "dep:quinn-proto",
-  "dep:rcgen",
-  "dep:rustls-pemfile",
-  "dep:rustls-pki-types",
-  "dep:secrecy",
-  "dep:webpki-roots",
-  "dep:x509-parser",
-  "dep:zenoh-config",
-  "tls",
-]
 tls = ["dep:rustls", "dep:rustls-webpki"]
-unsecure_quic = ["quic"]
-uring = []
 
 [dependencies]
 async-trait = { workspace = true }
-base64 = { workspace = true, optional = true }
-bytes = { workspace = true, optional = true }
 flume = { workspace = true }
 futures = { workspace = true }
-quinn = { workspace = true, optional = true }
-quinn-proto = { workspace = true, optional = true }
-rcgen = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
-rustls-pemfile = { workspace = true, optional = true }
-rustls-pki-types = { workspace = true, optional = true }
 rustls-webpki = { workspace = true, optional = true }
-secrecy = { workspace = true, optional = true }
 serde = { workspace = true, features = ["default"] }
 socket2 = { workspace = true }
 time = { workspace = true }
@@ -70,11 +46,8 @@ tokio = { workspace = true, features = [
 ] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
-webpki-roots = { workspace = true, optional = true }
-x509-parser = { workspace = true, optional = true }
 zenoh-buffers = { workspace = true }
 zenoh-codec = { workspace = true }
-zenoh-config = { workspace = true, optional = true }
 zenoh-core = { workspace = true }
 zenoh-protocol = { workspace = true }
 zenoh-result = { workspace = true }
@@ -83,3 +56,17 @@ zenoh-util = { workspace = true }
 
 [package.metadata.cargo-machete]
 ignored = ["rustls-webpki"]
+
+[lib]
+name = "zenoh_link_commons"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(feature, values("compression", "quic", "unsecure_quic", "uring"))',
+] }
+
+[package.metadata.bombay]
+upstream-repository = "https://github.com/eclipse-zenoh/zenoh"
+upstream-revision = "1211779c3647f5a96713dade452c546a07823580"
+controlled-repository = "https://github.com/devrandom-labs/bombay-zenoh"
+supported-profile = "tls-only"

@@ -18,7 +18,8 @@ description = { workspace = true }
 edition = { workspace = true }
 homepage = { workspace = true }
 license = { workspace = true }
-name = "zenoh"
+license-file = { workspace = true }
+name = "bombay-zenoh"
 readme = "README.md"
 repository = { workspace = true }
 rust-version = { workspace = true }
@@ -29,60 +30,12 @@ version = { workspace = true }
 maintenance = { status = "actively-developed" }
 
 [features]
-auth_pubkey = ["zenoh-transport/auth_pubkey"]
-auth_usrpwd = ["zenoh-transport/auth_usrpwd"]
-default = [
-  "auth_pubkey",
-  "auth_usrpwd",
-  "transport_compression",
-  "transport_multilink",
-  "transport_quic",
-  "transport_quic_datagram",
-  "transport_tcp",
-  "transport_tls",
-  "transport_udp",
-  "transport_unixsock-stream",
-  "transport_ws",
-]
-internal = [
-  "zenoh-config/internal",
-  "zenoh-keyexpr/internal",
-  "zenoh-protocol/internal",
-]
+default = ["transport_tls"]
+internal = ["zenoh-config/internal", "zenoh-keyexpr/internal", "zenoh-protocol/internal"]
 internal_config = []
-plugins = []
-runtime_plugins = ["plugins"]
-shared-memory = [
-  "zenoh-buffers/shared-memory",
-  "zenoh-protocol/shared-memory",
-  "zenoh-shm",
-  "zenoh-transport/shared-memory",
-]
-stats = ["zenoh-stats", "zenoh-transport/stats"]
 test = ["zenoh-transport/test"]
-tracing-instrument = [
-  "zenoh-runtime/tracing-instrument",
-  "zenoh-task/tracing-instrument",
-]
-transport_compression = ["zenoh-transport/transport_compression"]
-transport_multilink = ["zenoh-transport/transport_multilink"]
-transport_quic = ["zenoh-transport/transport_quic"]
-transport_quic_datagram = ["zenoh-transport/transport_quic_datagram"]
-transport_serial = ["zenoh-transport/transport_serial"]
-transport_tcp = ["zenoh-config/transport_tcp", "zenoh-transport/transport_tcp"]
 transport_tls = ["zenoh-transport/transport_tls"]
-transport_udp = ["zenoh-transport/transport_udp"]
-transport_unixpipe = ["zenoh-transport/transport_unixpipe"]
-transport_unixsock-stream = ["zenoh-transport/transport_unixsock-stream"]
-transport_vsock = ["zenoh-transport/transport_vsock"]
-transport_ws = ["zenoh-transport/transport_ws"]
-unstable = [
-  "zenoh-config/unstable",
-  "zenoh-keyexpr/unstable",
-  "zenoh-protocol/unstable",
-  "zenoh-transport/unstable",
-]
-uring = ["zenoh-transport/uring"]
+unstable = ["zenoh-config/unstable", "zenoh-keyexpr/unstable", "zenoh-protocol/unstable", "zenoh-transport/unstable"]
 
 [dependencies]
 ahash = { workspace = true, default-features = true }
@@ -123,8 +76,6 @@ zenoh-plugin-trait = { workspace = true }
 zenoh-protocol = { workspace = true, features = ["std"] }
 zenoh-result = { workspace = true }
 zenoh-runtime = { workspace = true }
-zenoh-shm = { workspace = true, optional = true }
-zenoh-stats = { workspace = true, optional = true }
 zenoh-sync = { workspace = true }
 zenoh-task = { workspace = true }
 zenoh-transport = { workspace = true }
@@ -148,24 +99,20 @@ rustc_version = { workspace = true }
 [lib]
 name = "zenoh"
 
-# For doc generation on docs.rs, activate the "unstable" and "shared-memory" feature to generate their documentation
-# NOTE: if you change this, also change it in .github/workflows/ci.yml in "doc" job.
 [package.metadata.docs.rs]
-features = ["shared-memory", "unstable"]
-
-[package.metadata.deb]
-assets = [{ source = "../README.md", dest = "README.md", mode = "644" }]
-copyright = "2024 ZettaScale Technology"
-depends = "zenohd (=1.10.1), zenoh-plugin-rest (=1.10.1), zenoh-plugin-storage-manager (=1.10.1)"
-license-file = ["../LICENSE", "0"]
-maintainer = "zenoh-dev@eclipse.org"
-maintainer-scripts = ".deb"
-name = "zenoh"
-section = "net"
+features = ["transport_tls"]
+no-default-features = true
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
   'cfg(nolocal_thread_not_available)',
+  'cfg(feature, values("auth_pubkey", "auth_usrpwd", "plugins", "runtime_plugins", "shared-memory", "stats", "tracing-instrument", "transport_compression", "transport_multilink", "transport_quic", "transport_quic_datagram", "transport_serial", "transport_tcp", "transport_udp", "transport_unixpipe", "transport_unixsock-stream", "transport_vsock", "transport_ws", "uring"))',
 ] }
 # This will be enabled by default in Edition 2024
 unsafe_op_in_unsafe_fn = "warn"
+
+[package.metadata.bombay]
+upstream-repository = "https://github.com/eclipse-zenoh/zenoh"
+upstream-revision = "1211779c3647f5a96713dade452c546a07823580"
+controlled-repository = "https://github.com/devrandom-labs/bombay-zenoh"
+supported-profile = "tls-only"

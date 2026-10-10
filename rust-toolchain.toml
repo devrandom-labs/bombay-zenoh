@@ -1,2 +1,5 @@
+# Nix and rustup use the same pinned stable compiler.
 [toolchain]
-channel = "1.97.1"
+channel = "1.99.0"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]
+profile = "minimal"

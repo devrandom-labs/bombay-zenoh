@@ -60,6 +60,7 @@ pub trait SampleBuilderTrait {
     fn attachment<T: Into<OptionZBytes>>(self, attachment: T) -> Self;
 }
 
+#[cfg(any(feature = "internal", feature = "unstable"))]
 pub trait TimestampInstrumentationBuilderTrait {
     /// Sets the timestamp stack instrumentation to be sent along with the publication.
     ///
@@ -244,6 +245,7 @@ impl<T> SampleBuilderTrait for SampleBuilder<T> {
     }
 }
 
+#[cfg(any(feature = "internal", feature = "unstable"))]
 #[zenoh_macros::internal_trait]
 impl<T> TimestampInstrumentationBuilderTrait for SampleBuilder<T> {
     #[zenoh_macros::unstable]

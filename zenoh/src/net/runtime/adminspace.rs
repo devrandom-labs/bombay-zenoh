@@ -47,6 +47,11 @@ use zenoh_protocol::{
 use zenoh_result::ZResult;
 use zenoh_transport::{multicast::TransportMulticast, unicast::TransportUnicast, TransportPeer};
 
+#[cfg(any(
+    feature = "unstable",
+    all(feature = "plugins", feature = "runtime_plugins")
+))]
+use super::DynamicRuntime;
 use super::{routing::dispatcher::face::Face, Runtime};
 #[cfg(all(feature = "plugins", feature = "runtime_plugins"))]
 use crate::api::plugins::PluginsManager;
@@ -62,7 +67,7 @@ use crate::{
     net::{
         primitives::Primitives,
         routing::{dispatcher::tables::Tables, gateway::Resource, hat::Sources},
-        runtime::{region, DynamicRuntime},
+        runtime::region,
     },
     LONG_VERSION,
 };

@@ -15,9 +15,15 @@ use std::{convert::TryFrom, sync::Arc, time::Duration};
 
 use zenoh_core::ztimeout;
 use zenoh_link::EndPoint;
+#[cfg(any(feature = "transport_tls", feature = "transport_quic"))]
+use zenoh_link_commons::tls::config::{
+    TLS_LISTEN_CERTIFICATE_RAW, TLS_LISTEN_PRIVATE_KEY_RAW, TLS_USE_PUBLIC_PKI,
+};
 use zenoh_protocol::core::{WhatAmI, ZenohIdProto};
 use zenoh_result::ZResult;
-use zenoh_test::{get_free_tcp_port, get_free_udp_port};
+use zenoh_test::get_free_tcp_port;
+#[cfg(any(feature = "transport_udp", feature = "transport_quic"))]
+use zenoh_test::get_free_udp_port;
 use zenoh_transport::{
     multicast::TransportMulticast,
     unicast::{test_helpers::make_transport_manager_builder, TransportUnicast},
@@ -25,7 +31,12 @@ use zenoh_transport::{
     TransportMulticastEventHandler, TransportPeer, TransportPeerEventHandler,
 };
 #[cfg(target_os = "linux")]
-#[cfg(any(feature = "transport_tcp", feature = "transport_udp"))]
+#[cfg(any(
+    feature = "transport_tcp",
+    feature = "transport_udp",
+    feature = "transport_tls",
+    feature = "transport_quic"
+))]
 use zenoh_util::net::get_ipv4_ipaddrs;
 
 const TIMEOUT: Duration = Duration::from_secs(60);
@@ -195,6 +206,7 @@ async fn openclose_transport(
     // Open a second transport from the client to the router
     // -> This should be accepted
     // (this stage is ignored for LowLatency transport, because it supports only one link)
+    #[cfg(feature = "transport_multilink")]
     if !lowlatency_transport {
         links_num = 2;
 
@@ -523,10 +535,24 @@ async fn openclose_transport_expect_open_failure(
     tokio::time::sleep(SLEEP).await;
 }
 
+#[cfg(any(
+    feature = "transport_tcp",
+    feature = "transport_udp",
+    feature = "transport_ws",
+    feature = "transport_unixpipe",
+    all(feature = "transport_unixsock-stream", target_family = "unix")
+))]
 async fn openclose_universal_transport(endpoint: &EndPoint) {
     openclose_transport(endpoint, endpoint, false).await
 }
 
+#[cfg(any(
+    feature = "transport_tcp",
+    feature = "transport_udp",
+    feature = "transport_ws",
+    feature = "transport_unixpipe",
+    all(feature = "transport_vsock", target_os = "linux")
+))]
 async fn openclose_lowlatency_transport(endpoint: &EndPoint) {
     openclose_transport(endpoint, endpoint, true).await
 }
@@ -536,6 +562,7 @@ async fn openclose_universal_transport_tls(
     mut endpoint: EndPoint,
     with_certificate_common_name: bool,
     with_mtls: bool,
+    use_public_pki: bool,
 ) {
     use zenoh_link_commons::tls::config::*;
 
@@ -563,6 +590,16 @@ async fn openclose_universal_transport_tls(
         )
         .unwrap();
     let mut connect_endpoint = endpoint;
+    connect_endpoint
+        .config_mut()
+        .extend_from_iter(
+            [(
+                TLS_USE_PUBLIC_PKI,
+                if use_public_pki { "true" } else { "false" },
+            )]
+            .into_iter(),
+        )
+        .unwrap();
     if with_mtls {
         listen_endpoint
             .config_mut()
@@ -685,7 +722,16 @@ async fn openclose_tls_only() {
     let endpoint: EndPoint = format!("tls/localhost:{}", get_free_tcp_port())
         .parse()
         .unwrap();
-    openclose_universal_transport_tls(endpoint, false, false).await;
+    openclose_universal_transport_tls(endpoint, false, false, true).await;
+}
+
+#[cfg(feature = "transport_tls")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn openclose_tls_only_with_no_public_pki() {
+    let endpoint: EndPoint = format!("tls/localhost:{}", get_free_tcp_port())
+        .parse()
+        .unwrap();
+    openclose_universal_transport_tls(endpoint, false, false, false).await;
 }
 
 #[cfg(feature = "transport_tls")]
@@ -694,7 +740,16 @@ async fn openclose_tls_only_with_mtls() {
     let endpoint: EndPoint = format!("tls/localhost:{}", get_free_tcp_port())
         .parse()
         .unwrap();
-    openclose_universal_transport_tls(endpoint, false, true).await;
+    openclose_universal_transport_tls(endpoint, false, true, true).await;
+}
+
+#[cfg(feature = "transport_tls")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn openclose_tls_only_with_mtls_and_no_public_pki() {
+    let endpoint: EndPoint = format!("tls/localhost:{}", get_free_tcp_port())
+        .parse()
+        .unwrap();
+    openclose_universal_transport_tls(endpoint, false, true, false).await;
 }
 
 #[cfg(feature = "transport_tls")]
@@ -703,7 +758,16 @@ async fn openclose_tls_only_with_no_common_name() {
     let endpoint: EndPoint = format!("tls/localhost:{}", get_free_tcp_port())
         .parse()
         .unwrap();
-    openclose_universal_transport_tls(endpoint, true, false).await;
+    openclose_universal_transport_tls(endpoint, true, false, true).await;
+}
+
+#[cfg(feature = "transport_tls")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn openclose_tls_only_with_no_common_name_and_no_public_pki() {
+    let endpoint: EndPoint = format!("tls/localhost:{}", get_free_tcp_port())
+        .parse()
+        .unwrap();
+    openclose_universal_transport_tls(endpoint, true, false, false).await;
 }
 
 #[cfg(feature = "transport_tls")]
@@ -712,7 +776,16 @@ async fn openclose_tls_only_with_mtls_and_no_common_name() {
     let endpoint: EndPoint = format!("tls/localhost:{}", get_free_tcp_port())
         .parse()
         .unwrap();
-    openclose_universal_transport_tls(endpoint, true, true).await;
+    openclose_universal_transport_tls(endpoint, true, true, true).await;
+}
+
+#[cfg(feature = "transport_tls")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn openclose_tls_only_with_mtls_and_no_common_name_and_no_public_pki() {
+    let endpoint: EndPoint = format!("tls/localhost:{}", get_free_tcp_port())
+        .parse()
+        .unwrap();
+    openclose_universal_transport_tls(endpoint, true, true, false).await;
 }
 
 #[cfg(feature = "transport_quic")]
@@ -721,7 +794,16 @@ async fn openclose_quic_only() {
     let endpoint: EndPoint = format!("quic/localhost:{}", get_free_udp_port())
         .parse()
         .unwrap();
-    openclose_universal_transport_tls(endpoint, false, false).await;
+    openclose_universal_transport_tls(endpoint, false, false, true).await;
+}
+
+#[cfg(feature = "transport_quic")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn openclose_quic_only_with_no_public_pki() {
+    let endpoint: EndPoint = format!("quic/localhost:{}", get_free_udp_port())
+        .parse()
+        .unwrap();
+    openclose_universal_transport_tls(endpoint, false, false, false).await;
 }
 
 #[cfg(feature = "transport_quic")]
@@ -730,7 +812,16 @@ async fn openclose_quic_only_with_mtls() {
     let endpoint: EndPoint = format!("quic/localhost:{}", get_free_udp_port())
         .parse()
         .unwrap();
-    openclose_universal_transport_tls(endpoint, false, true).await;
+    openclose_universal_transport_tls(endpoint, false, true, true).await;
+}
+
+#[cfg(feature = "transport_quic")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn openclose_quic_only_with_mtls_and_no_public_pki() {
+    let endpoint: EndPoint = format!("quic/localhost:{}", get_free_udp_port())
+        .parse()
+        .unwrap();
+    openclose_universal_transport_tls(endpoint, false, true, false).await;
 }
 
 #[cfg(feature = "transport_quic")]
@@ -739,7 +830,16 @@ async fn openclose_quic_only_with_no_common_name() {
     let endpoint: EndPoint = format!("quic/localhost:{}", get_free_udp_port())
         .parse()
         .unwrap();
-    openclose_universal_transport_tls(endpoint, true, false).await;
+    openclose_universal_transport_tls(endpoint, true, false, true).await;
+}
+
+#[cfg(feature = "transport_quic")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn openclose_quic_only_with_no_common_name_and_no_public_pki() {
+    let endpoint: EndPoint = format!("quic/localhost:{}", get_free_udp_port())
+        .parse()
+        .unwrap();
+    openclose_universal_transport_tls(endpoint, true, false, false).await;
 }
 
 #[cfg(feature = "transport_quic")]
@@ -748,7 +848,74 @@ async fn openclose_quic_only_with_mtls_and_no_common_name() {
     let endpoint: EndPoint = format!("quic/localhost:{}", get_free_udp_port())
         .parse()
         .unwrap();
-    openclose_universal_transport_tls(endpoint, true, true).await;
+    openclose_universal_transport_tls(endpoint, true, true, true).await;
+}
+
+#[cfg(feature = "transport_quic")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn openclose_quic_only_with_mtls_and_no_common_name_and_no_public_pki() {
+    let endpoint: EndPoint = format!("quic/localhost:{}", get_free_udp_port())
+        .parse()
+        .unwrap();
+    openclose_universal_transport_tls(endpoint, true, true, false).await;
+}
+
+#[cfg(feature = "transport_tls")]
+#[should_panic(expected = "assertion failed: open_res.is_ok()")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn openclose_tls_only_with_no_public_pki_and_no_ca() {
+    zenoh_util::init_log_from_env_or("error");
+
+    let (_, cert, key) = get_tls_certs();
+    let port = get_free_tcp_port();
+    let mut listen_endpoint: EndPoint = format!("tls/localhost:{port}").parse().unwrap();
+    listen_endpoint
+        .config_mut()
+        .extend_from_iter(
+            [
+                (TLS_LISTEN_PRIVATE_KEY_RAW, key),
+                (TLS_LISTEN_CERTIFICATE_RAW, cert),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+    let mut connect_endpoint: EndPoint = format!("tls/localhost:{port}").parse().unwrap();
+    connect_endpoint
+        .config_mut()
+        .extend_from_iter([(TLS_USE_PUBLIC_PKI, "false")].into_iter())
+        .unwrap();
+
+    openclose_transport(&listen_endpoint, &connect_endpoint, false).await;
+}
+
+#[cfg(feature = "transport_quic")]
+#[should_panic(expected = "assertion failed: open_res.is_ok()")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn openclose_quic_only_with_no_public_pki_and_no_ca() {
+    zenoh_util::init_log_from_env_or("error");
+
+    let (_, cert, key) = get_tls_certs();
+    let port = get_free_udp_port();
+    let mut listen_endpoint: EndPoint = format!("quic/localhost:{port}").parse().unwrap();
+    listen_endpoint
+        .config_mut()
+        .extend_from_iter(
+            [
+                (TLS_LISTEN_PRIVATE_KEY_RAW, key),
+                (TLS_LISTEN_CERTIFICATE_RAW, cert),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+    let mut connect_endpoint: EndPoint = format!("quic/localhost:{port}").parse().unwrap();
+    connect_endpoint
+        .config_mut()
+        .extend_from_iter([(TLS_USE_PUBLIC_PKI, "false")].into_iter())
+        .unwrap();
+
+    openclose_transport(&listen_endpoint, &connect_endpoint, false).await;
 }
 
 #[cfg(feature = "transport_tcp")]

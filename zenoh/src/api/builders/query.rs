@@ -20,6 +20,8 @@ use zenoh_core::{Resolvable, Wait};
 use zenoh_protocol::{core::CongestionControl, network::request::ext::QueryTarget};
 use zenoh_result::ZResult;
 
+#[cfg(any(feature = "internal", feature = "unstable"))]
+use crate::api::builders::sample::TimestampInstrumentationBuilderTrait;
 #[cfg(feature = "unstable")]
 use crate::api::cancellation::CancellationTokenBuilderTrait;
 #[cfg(feature = "unstable")]
@@ -28,10 +30,7 @@ use crate::api::sample::SourceInfo;
 use crate::api::timestamp_stack::TimestampInstrumentation;
 use crate::{
     api::{
-        builders::sample::{
-            EncodingBuilderTrait, QoSBuilderTrait, SampleBuilderTrait,
-            TimestampInstrumentationBuilderTrait,
-        },
+        builders::sample::{EncodingBuilderTrait, QoSBuilderTrait, SampleBuilderTrait},
         bytes::ZBytes,
         encoding::Encoding,
         handlers::{locked, Callback, DefaultHandler, IntoHandler},
@@ -111,6 +110,7 @@ impl<Handler> SampleBuilderTrait for SessionGetBuilder<'_, '_, Handler> {
     }
 }
 
+#[cfg(any(feature = "internal", feature = "unstable"))]
 #[zenoh_macros::internal_trait]
 impl<Handler> TimestampInstrumentationBuilderTrait for SessionGetBuilder<'_, '_, Handler> {
     #[zenoh_macros::unstable]

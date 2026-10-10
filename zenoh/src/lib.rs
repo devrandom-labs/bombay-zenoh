@@ -154,60 +154,27 @@
 //! }
 //! ```
 //!
+//! # Bombay dependency profile
+//!
+//! This controlled copy is based on Zenoh 1.10.1 and retains its Rust library
+//! name. It includes the reviewed deployment-root selection correction and
+//! supports TLS transport only. Upstream functionality described above must be
+//! interpreted within this profile; the upstream examples are not delivery
+//! evidence for Bombay's configuration or actor contracts.
+//!
 //! # Features
-//! The following features are exposed by the crate:
-//! * `auth_pubkey`, `auth_usrpwd`
 //!
-//!   Enable authentication support, credentials are configurable in the [`Config`]
+//! * `transport_tls`: TLS transport support; this is the only default feature.
+//! * `internal`, `internal_config`, `unstable`, `test`: retained maintainer
+//!   interfaces for owning verification. Cargo allows consumers to enable them,
+//!   but they are unsupported ordinary Bombay application interfaces.
 //!
-//! * `internal`
-//!
-//!   Enable some internal APIs, usually necessary to expose some internal functionalities to other language bindings. These APIs are not supposed
-//!   to be called by users as they are close to implementation and can be changed at any moment
-//!
-//! * `plugins`
-//!
-//!   Enable the APIs related to plugin support in `zenohd`. These APIs are `internal` and `unstable` for now
-//!
-//! * `runtime_plugins`
-//!
-//!   Enable the dynamic plugins loading. Includes `plugins`. May be removed in future and combined with `plugins`
-//!
-//! * `shared-memory`
-//!
-//!   Enable shared-memory transport support and specific shared-memory related APIs
-//!
-//! * `stats`
-//!
-//!   Enable collection of statistical data. This data becomes available in "adminspace" (by key `@/<zenoh_id>/router/metrics`)
-//!
-//! * `tracing-instrument`
-//!
-//!   Developer feature - enable tracing of asynchronous tasks for debugging
-//!
-//! * `transport-compression`
-//!
-//!   Enable data-compression on the fly. If this feature is enabled, compression can be turned on or off in [`Config`]
-//!
-//! * `transport_multilink`
-//!
-//!   Enable multiple link connection for unicast transports. Maximum number of connections is configurable in [`Config`]
-//!
-//! * `transport_quic`, `transport_quic_datagram`, `transport_serial`, `transport_tcp`, `transport_tls`,
-//!   `transport_udp`, `transport_unixpipe`, `transport_unixsock-stream`, `transport_vsock`, `transport_ws`
-//!
-//!   Enable specific transports
-//!
-//! * `unstable`
-//!
-//!   Enable the unstable APIs which may change or disappear in future releases. The difference with `internal`
-//!   is that the `unstable` API may be stabilized, while `internal` is unstable by nature, because it reveals implementation details.
-//!
-//! The features enabled by default are:
-//!
-//! `auth_pubkey`, `auth_usrpwd`, `transport_compression`, `transport_multilink`,
-//! `transport_quic`, `transport_quic_datagram`, `transport_tcp`, `transport_tls`, `transport_udp`,
-//! `transport_unixsock-stream`, `transport_ws`.
+//! Other transports, SHM, compression, multiple links, separate password/RSA
+//! authentication, plugins, statistics and extra task tracing are unavailable
+//! Cargo options in this copy. Ordinary logging and core publish/subscribe and
+//! query/reply remain available. Bombay's deployment profile additionally
+//! requires mutual TLS, configured deployment roots and explicit addresses;
+//! a library feature alone does not enforce those application requirements.
 //!
 #[macro_use]
 extern crate zenoh_core;
