@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       operation:
-        description: Verify packaging or publish the reviewed cohort
+        description: Verify packaging or publish the reviewed Zenoh successor
         required: true
         type: choice
         default: verify
@@ -61,6 +61,7 @@ jobs:
             target/package/tmp-crate/bombay-*.crate
             target/package/audited-cohort.json
             target/package/registry-receipts.json
+            target/package/tmp-crate/published-dependencies.json
             target/retained-source/target/package/tmp-crate/bombay-*.crate
             target/retained-source/target/package/audited-cohort.json
             target/retained-source/target/package/remaining-cohort.json

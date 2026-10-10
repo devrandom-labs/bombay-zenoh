@@ -3,13 +3,20 @@
 The first registry publication retained source `e82481825e313ff14e5ea3a1d6e842040945372a`
 and artifact run `38028659029`. Five packages were published with matching archive
 checksums before crates.io refused the next new crate with HTTP 429.
-The manual `resume` operation releases only the four absent packages from that
+The historical manual `resume` operation released only the four absent packages from that
 unchanged source. Reviewed current-main automation and original-source CI must
 both pass; the original artifact, published prefix and regenerated candidate bytes
 must match. Its credential authority covers only those four exact archives.
 Any further partial refusal stops the operation and preserves registry receipts;
 this is neither an atomic cohort release nor an automatic retry. Registry-only
-consumer verification is still required after all nine receipts are established.
+consumer verification passed after all nine publication receipts were established.
+
+The next reviewed release candidate is only `bombay-zenoh 1.10.2`, correcting
+leading UTF-8 resource chunks. Its eight published dependency versions and
+archive checksums remain unchanged. Current verify/publish operations audit one
+new owning archive and those exact published dependencies; historical resume
+keeps its original source and transaction. Registry publication and a clean
+registry-only consumer remain required before claiming this successor delivered.
 
 This local source is based on upstream revision
 `1211779c3647f5a96713dade452c546a07823580` (1.10.1). The controlled package

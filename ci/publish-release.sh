@@ -17,17 +17,13 @@ required_check=$(gh api "repos/$GITHUB_REPOSITORY/commits/$source_commit/check-r
   --jq '[.check_runs[] | select(.name == "Controlled TLS dependencies" and .app.id == 15368)] | sort_by(.started_at) | last | .conclusion')
 [[ "$required_check" == success ]] || { printf 'Exact source lacks required passing CI\n' >&2; exit 1; }
 
-release_packages=(
-  bombay-validated-struct-macros bombay-validated-struct
-  bombay-zenoh-link-commons bombay-zenoh-config bombay-zenoh-link-tls
-  bombay-zenoh-plugin-trait bombay-zenoh-link bombay-zenoh-transport bombay-zenoh
-)
+release_packages=(bombay-zenoh)
 package_arguments=()
 for package in "${release_packages[@]}"; do package_arguments+=(-p "$package"); done
-# Cargo builds the same selected cohort and retains its actual publication candidates.
-cargo publish --dry-run "${package_arguments[@]}" --features json_get,json5 --locked --jobs 2
+# Cargo verifies the one successor against immutable published dependencies.
+cargo publish --dry-run "${package_arguments[@]}" --no-default-features --features transport_tls --locked --jobs 2
 cohort="$PWD/target/package/audited-cohort.json"
-python3 ci/verify_archives.py "$PWD" "$PWD/target/package/tmp-crate" "$cohort"
+python3 ci/verify_archives.py "$PWD" "$PWD/target/package/tmp-crate" "$cohort" --release-kind zenoh-successor
 if [[ "$RELEASE_OPERATION" == verify ]]; then
   printf 'Verified exact source and publication candidates; publishing authority remains unproved.\n'
   exit 0
@@ -62,7 +58,7 @@ for package, archive in cohort.items():
         if receipt != archive:
             refused.append(f"{package}: registered archive differs")
         elif phase == "before":
-            refused.append(f"{package}: already registered; prepare reviewed partial-cohort resumption")
+            refused.append(f"{package}: already registered; prepare a reviewed successor version")
     except HTTPError as error:
         receipt = {"status": "absent" if error.code == 404 else "unavailable", "http": error.code}
         if error.code != 404 or phase == "after":
@@ -85,7 +81,7 @@ remote_commit=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.obje
 [[ "$source_commit" == "$remote_commit" ]] || { printf 'Main changed before publication\n' >&2; exit 1; }
 publish_status=0
 cargo --config "registry.credential-provider=[\"$provider\",\"$cohort\"]" \
-  publish "${package_arguments[@]}" --features json_get,json5 --locked --jobs 2 || publish_status=$?
+  publish "${package_arguments[@]}" --no-default-features --features transport_tls --locked --jobs 2 || publish_status=$?
 receipt_status=0
 record_registry_receipts after || receipt_status=$?
 # Preserve an actual publication refusal even when the already uploaded prefix verifies.
