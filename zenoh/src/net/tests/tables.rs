@@ -1370,3 +1370,31 @@ fn big_key_expr() {
     res.get_best_key("/a", face.state.id + 1);
     Resource::get_matches(&face.tables.tables.read().unwrap().data, &key_expr);
 }
+
+#[test]
+fn leading_utf8_chunks_preserve_registered_resources() {
+    for expression in ["é", "é/a", "界/b", "🦀/c", "a", "a/b", "a/é/b"] {
+        let router = new_router();
+        let face = router.new_session(Arc::new(DummyPrimitives {}));
+        let root = zread!(router.tables.tables).data._get_root().clone();
+        let key = KeyExpr::new(expression).expect("UTF-8 is a valid key expression");
+        let wire = WireExpr::from(&**key);
+        register_expr(&router.tables, &mut face.state.clone(), 1, &wire);
+        let resolved = Resource::get_resource(&root, expression)
+            .expect("the actual registered expression remains resolvable");
+        assert_eq!(resolved.expr(), expression);
+        if let Some((prefix, _)) = expression.split_once('/') {
+            let ancestor = Resource::get_resource(&root, prefix)
+                .expect("the leading path chunk is independently registered");
+            assert_eq!(ancestor.expr(), prefix);
+        }
+        let empty = Resource::get_resource(&root, "").expect("the root remains resolvable");
+        assert!(Arc::ptr_eq(&root, &empty));
+        let mapped = face
+            .state
+            .remote_mappings
+            .get(&1)
+            .expect("the actual declaration retains its exact mapping");
+        assert!(Arc::ptr_eq(mapped, &resolved));
+    }
+}

@@ -12,7 +12,9 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 
+#[cfg(feature = "transport_tcp")]
 mod interceptor_cache;
+#[cfg(feature = "transport_tcp")]
 mod link_weights;
 
 mod query_reply;

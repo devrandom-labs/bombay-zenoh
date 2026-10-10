@@ -646,13 +646,10 @@ impl Resource {
     /// For example `split_first_chunk("/a/b") == Some(("/a", "/b"))`.
     #[inline(always)]
     fn split_first_chunk(suffix: &str) -> Option<(&str, &str)> {
-        if suffix.is_empty() {
-            return None;
-        }
-        // don't count the first char which may be a leading slash to find the next one
-        Some(match suffix[1..].find('/') {
-            // don't forget to add 1 to the index because of `[1..]` slice above
-            Some(idx) => suffix.split_at(idx + 1),
+        let leading_width = suffix.chars().next()?.len_utf8();
+        // Skip the first complete character, which may be a leading slash.
+        Some(match suffix[leading_width..].find('/') {
+            Some(idx) => suffix.split_at(idx + leading_width),
             None => (suffix, ""),
         })
     }
