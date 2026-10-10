@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       source_commit:
-        description: Exact verified main commit
+        description: Verified source commit (current main; retained e8248182 for resume)
         required: true
         type: string
       operation:
