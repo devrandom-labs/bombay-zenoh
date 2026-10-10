@@ -1,0 +1,53 @@
+name: Manual controlled dependency release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact verified main commit
+        required: true
+        type: string
+      operation:
+        description: Verify packaging or publish the reviewed cohort
+        required: true
+        type: choice
+        default: verify
+        options: [verify, publish]
+
+permissions:
+  contents: read
+  checks: read
+
+concurrency:
+  group: controlled-dependency-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Manual verified release
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c
+        with:
+          nix_conf: |
+            experimental-features = nix-command flakes
+      - name: Release the exact verified source
+        run: nix develop -c bash ci/publish-release.sh
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ inputs.source_commit }}
+          RELEASE_OPERATION: ${{ inputs.operation }}
+          GH_TOKEN: ${{ github.token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_SECRET }}
+      - name: Retain exact package artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: controlled-release-${{ github.sha }}
+          path: target/package/bombay-*.crate
+          if-no-files-found: ignore
+          retention-days: 14

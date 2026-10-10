@@ -49,6 +49,7 @@
           packages = [
             toolchain
             pkgs.python3
+            pkgs.gh
             pkgs.pkg-config
             pkgs.openssl
           ];

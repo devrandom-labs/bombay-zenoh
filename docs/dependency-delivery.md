@@ -91,7 +91,14 @@ assertions and selected feature denials. Package availability alone does not pro
 that a normal Bombay installation uses the corrected graph.
 
 At preparation on 2026-10-10, all nine package identities returned crates.io 404.
-The authenticated GitHub user can administer the organization, but no usable
-local crates.io publication credential was configured. Repository review and CI
-can proceed independently; actual registry publication awaits publishing authority.
+The authenticated GitHub user can administer the organization. No local publishing
+credential is configured, but the existing organization-wide
+`CARGO_REGISTRY_SECRET` is available to the separately reviewed manual release
+workflow. Its presence does not prove its publishing scope. The `verify` operation
+checks exact current main, required successful CI and actual package archives;
+it does not claim to authenticate the token. Ordinary Cargo/crates.io verifies
+actual authority for the exact package before registry writes during the explicitly
+selected `publish` operation. Authentication or scope refusal stops subsequent
+publication without bypassing the owning registry checks. Earlier successful
+publications, if any, remain recorded separately from later failures.
 No registry publication, release tag or completed feature delivery is recorded here.
