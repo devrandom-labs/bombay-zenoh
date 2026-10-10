@@ -13,6 +13,7 @@
 #
 [workspace]
 exclude = [
+  "ci/configuration-consumer",
   "ci/nostd-check",
   "ci/valgrind-check",
   "ci/zenoh-1-75",

@@ -15,6 +15,10 @@ use std::{convert::TryFrom, sync::Arc, time::Duration};
 
 use zenoh_core::ztimeout;
 use zenoh_link::EndPoint;
+#[cfg(any(feature = "transport_tls", feature = "transport_quic"))]
+use zenoh_link_commons::tls::config::{
+    TLS_LISTEN_CERTIFICATE_RAW, TLS_LISTEN_PRIVATE_KEY_RAW, TLS_USE_PUBLIC_PKI,
+};
 use zenoh_protocol::core::{WhatAmI, ZenohIdProto};
 use zenoh_result::ZResult;
 use zenoh_test::get_free_tcp_port;
@@ -860,8 +864,6 @@ async fn openclose_quic_only_with_mtls_and_no_common_name_and_no_public_pki() {
 #[should_panic(expected = "assertion failed: open_res.is_ok()")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn openclose_tls_only_with_no_public_pki_and_no_ca() {
-    use zenoh_link_commons::tls::config::*;
-
     zenoh_util::init_log_from_env_or("error");
 
     let (_, cert, key) = get_tls_certs();
@@ -891,8 +893,6 @@ async fn openclose_tls_only_with_no_public_pki_and_no_ca() {
 #[should_panic(expected = "assertion failed: open_res.is_ok()")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn openclose_quic_only_with_no_public_pki_and_no_ca() {
-    use zenoh_link_commons::tls::config::*;
-
     zenoh_util::init_log_from_env_or("error");
 
     let (_, cert, key) = get_tls_certs();

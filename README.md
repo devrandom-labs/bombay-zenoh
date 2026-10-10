@@ -17,7 +17,7 @@ Bombay additionally requires mutual TLS, configured deployment roots and explici
 addresses. Those deployment requirements are not implied by enabling TLS alone.
 
 Current supported-profile guidance is in `zenoh/README.md`.
-Inherited internal-owner README guidance is being reconciled before release.
+Internal-owner READMEs identify their controlled package and link this profile.
 
 The upstream overview and links below describe the original project, whose
 full runtime profile and release status do not describe these controlled copies.
