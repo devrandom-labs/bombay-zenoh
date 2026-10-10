@@ -59,6 +59,6 @@ for profile in debug release; do
   done
 done
 
-# Cargo verifies the complete unpublished cohort against its temporary registry.
-cargo package "${package_arguments[@]}" --features json_get,json5 --locked --jobs 2
-python3 ci/verify_archives.py "$PWD" "$PWD/target/package"
+# Verify only the successor against unchanged actual published dependencies.
+cargo package -p bombay-zenoh --no-default-features --features transport_tls --locked --jobs 2
+python3 ci/verify_archives.py "$PWD" "$PWD/target/package" --release-kind zenoh-successor

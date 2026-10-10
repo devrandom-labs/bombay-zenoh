@@ -1,13 +1,17 @@
 """Audit actual release archives; local verification does not prove publication."""
 
+import argparse
 import copy
+import enum
 import hashlib
 import json
 import subprocess
-import sys
 import tarfile
 import tomllib
+from io import BytesIO
 from pathlib import Path, PurePosixPath
+from tempfile import TemporaryDirectory
+from urllib.request import Request, urlopen
 
 CONTROLLED_REPOSITORY = "https://github.com/devrandom-labs/bombay-zenoh"
 ZENOH_REVISION = "1211779c3647f5a96713dade452c546a07823580"
@@ -52,6 +56,24 @@ FEATURES = {
 }
 
 
+class ReleaseKind(enum.Enum):
+    INITIAL_COHORT = "initial-cohort"
+    ZENOH_SUCCESSOR = "zenoh-successor"
+
+
+PUBLISHED_REVISION = "e82481825e313ff14e5ea3a1d6e842040945372a"
+PUBLISHED_DEPENDENCIES = {
+    "zenoh-config": "84f764e6cc4f3c122b87f5ad715460c54e09fc95b690919740defe4e264ed482",
+    "zenoh-link-commons": "ef9224e682a1cf8f57bb4fc88f98ac6a1f51036fc6f82b7b1c05dfcbafa8e37c",
+    "zenoh-link-tls": "29075698e973b6d270f1d7e170209b70b4a2d14eac7aca61b559a29861c0246c",
+    "zenoh-link": "40ff7d86f5e5da473ca7e05ca452c2782971ef3eb45ee1ac8c80a7b7fd9a5c91",
+    "zenoh-plugin-trait": "7f706fdfff554904c5c87ffee53ceeb5c16c81d720444e4add2877753af09b64",
+    "zenoh-transport": "3adae45298b79e80fc6c3494a4e26b84b5f347ee71aa83d5db85df9db8f6b627",
+    "validated_struct": "b1b9764c93caf9628a9c391a92132f1bc84a8816b01ff486cc18b08101e2c3c7",
+    "validated_struct_macros": "602d3538d65be50613f90d69dd21c504d4e894ae2ae13c41ba89163fd4b33b55",
+}
+
+
 def require(condition, description):
     if not condition:
         raise ValueError(description)
@@ -61,7 +83,9 @@ def identity(owner):
     return "bombay-" + owner.replace("_", "-")
 
 
-def version(owner):
+def version(owner, release_kind=ReleaseKind.INITIAL_COHORT):
+    if owner == "zenoh" and release_kind is ReleaseKind.ZENOH_SUCCESSOR:
+        return "1.10.2"
     return "1.10.1" if owner in ZENOH_OWNERS else "2.2.0"
 
 
@@ -71,10 +95,10 @@ def dependency_tables(manifest):
             yield from section.get(category, {}).items()
 
 
-def verify_manifest(owner, manifest):
+def verify_manifest(owner, manifest, release_kind=ReleaseKind.INITIAL_COHORT):
     package = manifest["package"]
     require(package["name"] == identity(owner), f"{owner}: package identity")
-    require(package["version"] == version(owner), f"{owner}: package version")
+    require(package["version"] == version(owner, release_kind), f"{owner}: package version")
     require(manifest["lib"]["name"] == owner.replace("-", "_"), f"{owner}: library identity")
     require(package["repository"] == CONTROLLED_REPOSITORY, f"{owner}: repository")
     require(package["license"] == "EPL-2.0 OR Apache-2.0", f"{owner}: license expression")
@@ -118,9 +142,13 @@ def verify_manifest(owner, manifest):
         require(features.get("default", []) == expected_default, f"{owner}: default profile")
 
 
-def read_archive(archive, prefix):
+def read_archive(archive, prefix, expected_checksum=None):
+    archive_bytes = archive.read_bytes()
+    if expected_checksum is not None:
+        require(hashlib.sha256(archive_bytes).hexdigest() == expected_checksum,
+                f"{prefix}: immutable archive checksum")
     contents = {}
-    with tarfile.open(archive, "r:gz") as packaged:
+    with tarfile.open(fileobj=BytesIO(archive_bytes), mode="r:gz") as packaged:
         for member in packaged.getmembers():
             path = PurePosixPath(member.name)
             require(path.parts[0] == prefix and ".." not in path.parts, "archive path escape")
@@ -133,11 +161,15 @@ def read_archive(archive, prefix):
     return contents
 
 
-def verify_archive(root, archives, owner, revision):
-    prefix = identity(owner) + "-" + version(owner)
-    contents = read_archive(archives / (prefix + ".crate"), prefix)
+def verify_archive(root, archives, owner, revision, release_kind=ReleaseKind.INITIAL_COHORT,
+                   expected_checksum=None):
+    prefix = identity(owner) + "-" + version(owner, release_kind)
+    archive = archives / (prefix + ".crate")
+    if release_kind is ReleaseKind.ZENOH_SUCCESSOR and owner != "zenoh":
+        expected_checksum = PUBLISHED_DEPENDENCIES[owner]
+    contents = read_archive(archive, prefix, expected_checksum)
     manifest = tomllib.loads(contents["Cargo.toml"].decode())
-    verify_manifest(owner, manifest)
+    verify_manifest(owner, manifest, release_kind)
     directory = root / (ZENOH_OWNERS[owner] if owner in ZENOH_OWNERS else
                         "dependencies/" + CONFIGURATION_OWNERS[owner][0])
     require(contents["Cargo.toml.orig"] == (directory / "Cargo.toml").read_bytes(), f"{owner}: active manifest custody")
@@ -161,11 +193,11 @@ def verify_archive(root, archives, owner, revision):
         if (directory / custody).exists():
             require(contents[custody] == (directory / custody).read_bytes(), f"{owner}: {custody}")
     print(f"verified {prefix}: {len(actual)} Rust files; archive sha256="
-          + hashlib.sha256((archives / (prefix + ".crate")).read_bytes()).hexdigest())
+          + (expected_checksum or hashlib.sha256(archive.read_bytes()).hexdigest()))
     return manifest
 
 
-def verify_lock(owner, lock, checksums):
+def verify_lock(owner, lock, checksums, release_kind=ReleaseKind.INITIAL_COHORT):
     source_names = [package["name"] for package in lock["package"] if "source" not in package]
     require(source_names == [identity(owner)], f"{owner}: locked owning source node")
     controlled_names = {identity(dependency): dependency for dependency in EDGES}
@@ -177,7 +209,7 @@ def verify_lock(owner, lock, checksums):
             continue
         controlled = controlled_names.get(name)
         require(controlled in EDGES, f"{owner}: unexpected locked package {name}")
-        require(package["version"] == version(controlled), f"{owner}: locked version {name}")
+        require(package["version"] == version(controlled, release_kind), f"{owner}: locked version {name}")
         if "source" not in package:
             require(name == identity(owner), f"{owner}: nonregistry locked dependency {name}")
             continue
@@ -217,18 +249,75 @@ def verify_lock(owner, lock, checksums):
     return edges
 
 
+def acquire_published_dependencies(archives):
+    receipts = {}
+    require(set(PUBLISHED_DEPENDENCIES) == set(EDGES) - {"zenoh"}, "published dependency inventory")
+    for owner, checksum in PUBLISHED_DEPENDENCIES.items():
+        package, selected_version = identity(owner), version(owner)
+        prefix = package + "-" + selected_version
+        headers = {"User-Agent": "Bombay controlled dependency release"}
+        with urlopen(Request(f"https://crates.io/api/v1/crates/{package}/{selected_version}",
+                             headers=headers), timeout=30) as response:
+            published = json.load(response)["version"]
+        require(published["crate"] == package and published["num"] == selected_version
+                and published["checksum"] == checksum
+                and not published["yanked"], f"{owner}: published dependency receipt")
+        archive = archives / (prefix + ".crate")
+        with urlopen(Request(f"https://static.crates.io/crates/{package}/{prefix}.crate",
+                             headers=headers), timeout=30) as response:
+            archive.write_bytes(response.read())
+        require(hashlib.sha256(archive.read_bytes()).hexdigest() == checksum,
+                f"{owner}: immutable published archive checksum")
+        receipts[package] = {"version": selected_version, "checksum": checksum,
+                             "expected_source": PUBLISHED_REVISION}
+        (archives / "published-dependencies.json").write_text(
+            json.dumps(receipts, indent=2, sort_keys=True) + "\n")
+
+
 def main():
-    root, archives = map(Path, sys.argv[1:3])
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("root", type=Path)
+    parser.add_argument("archives", type=Path)
+    parser.add_argument("ledger", type=Path, nargs="?")
+    parser.add_argument("--release-kind", choices=[kind.value for kind in ReleaseKind],
+                        default=ReleaseKind.INITIAL_COHORT.value)
+    arguments = parser.parse_args()
+    root, archives = arguments.root, arguments.archives
+    release_kind = ReleaseKind(arguments.release_kind)
+    if release_kind is ReleaseKind.ZENOH_SUCCESSOR:
+        acquire_published_dependencies(archives)
     revision = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
-    manifests = {owner: verify_archive(root, archives, owner, revision) for owner in EDGES}
     checksums = {identity(owner): hashlib.sha256(
-        (archives / (identity(owner) + "-" + version(owner) + ".crate")).read_bytes()).hexdigest()
+        (archives / (identity(owner) + "-" + version(owner, release_kind) + ".crate")).read_bytes()).hexdigest()
         for owner in EDGES}
+    manifests = {owner: verify_archive(
+        root, archives, owner,
+        PUBLISHED_REVISION if release_kind is ReleaseKind.ZENOH_SUCCESSOR and owner != "zenoh" else revision,
+        release_kind, checksums[identity(owner)]) for owner in EDGES}
     locks = {owner: tomllib.loads(read_archive(
-        archives / (identity(owner) + "-" + version(owner) + ".crate"),
-        identity(owner) + "-" + version(owner))["Cargo.lock"].decode()) for owner in EDGES}
-    edge_count = sum(len(verify_lock(owner, lock, checksums)) for owner, lock in locks.items())
+        archives / (identity(owner) + "-" + version(owner, release_kind) + ".crate"),
+        identity(owner) + "-" + version(owner, release_kind), checksums[identity(owner)])["Cargo.lock"].decode()) for owner in EDGES}
+    edge_count = sum(len(verify_lock(owner, lock, checksums, release_kind)) for owner, lock in locks.items())
     require(edge_count == 29, "controlled archived checksum edge inventory changed")
+    if release_kind is ReleaseKind.ZENOH_SUCCESSOR:
+        # Changing gzip metadata preserves source members but violates published byte custody.
+        with TemporaryDirectory(prefix="bombay-published-archive-") as temporary:
+            owner = "zenoh-config"
+            archive_name = identity(owner) + "-" + version(owner) + ".crate"
+            original = (archives / archive_name).read_bytes()
+            changed = bytearray(original)
+            changed[4] ^= 1
+            mutant_archives = Path(temporary)
+            (mutant_archives / archive_name).write_bytes(changed)
+            try:
+                verify_archive(root, mutant_archives, owner, PUBLISHED_REVISION, release_kind)
+            except ValueError as refused:
+                require("immutable archive checksum" in str(refused),
+                        f"wrong published archive inversion diagnostic: {refused}")
+                print(f"intended published archive inversion refused: {refused}")
+            else:
+                raise ValueError("changed immutable published archive unexpectedly accepted")
+            verify_archive(root, archives, owner, PUBLISHED_REVISION, release_kind)
     for defect in ("checksum", "identity", "closure", "reference"):
         mutant = copy.deepcopy(locks["zenoh-config"])
         dependency = next(package for package in mutant["package"]
@@ -248,13 +337,13 @@ def main():
             source["dependencies"].remove(identity("validated_struct"))
             diagnostic = "locked dependency edges"
         try:
-            verify_lock("zenoh-config", mutant, checksums)
+            verify_lock("zenoh-config", mutant, checksums, release_kind)
         except ValueError as refused:
             require(diagnostic in str(refused), f"wrong lock inversion diagnostic: {refused}")
             print(f"intended lock {defect} inversion refused: {refused}")
         else:
             raise ValueError(f"lock {defect} inversion unexpectedly accepted")
-        verify_lock("zenoh-config", locks["zenoh-config"], checksums)
+        verify_lock("zenoh-config", locks["zenoh-config"], checksums, release_kind)
     print(f"Verified {edge_count} controlled archived registry checksum edges.")
     for owner, defect in (("zenoh-config", "dependency"), ("zenoh", "feature")):
         mutant = copy.deepcopy(manifests[owner])
@@ -265,18 +354,20 @@ def main():
             mutant["features"]["transport_tcp"] = ["zenoh-transport/transport_tcp"]
             expected_diagnostic = "excluded feature forwarding zenoh-transport/transport_tcp"
         try:
-            verify_manifest(owner, mutant)
+            verify_manifest(owner, mutant, release_kind)
         except ValueError as refused:
             require(expected_diagnostic in str(refused), f"wrong inversion diagnostic: {refused}")
             print(f"intended {defect} inversion refused: {refused}")
         else:
             raise ValueError(f"{defect} inversion unexpectedly accepted")
-        verify_archive(root, archives, owner, revision)
-    if len(sys.argv) == 4:
-        cohort = {identity(owner): {"version": version(owner), "checksum": checksums[identity(owner)]}
-                  for owner in EDGES}
-        Path(sys.argv[3]).write_text(json.dumps(cohort, sort_keys=True) + "\n")
-    print("Nine actual archives and restored archive controls passed; publication remains unproved.")
+        verify_archive(root, archives, owner,
+                       PUBLISHED_REVISION if release_kind is ReleaseKind.ZENOH_SUCCESSOR and owner != "zenoh" else revision,
+                       release_kind, checksums[identity(owner)])
+    if arguments.ledger is not None:
+        cohort = {identity(owner): {"version": version(owner, release_kind), "checksum": checksums[identity(owner)]}
+                  for owner in EDGES if release_kind is ReleaseKind.INITIAL_COHORT or owner == "zenoh"}
+        arguments.ledger.write_text(json.dumps(cohort, sort_keys=True) + "\n")
+    print(f"Nine actual {release_kind.value} archives and restored archive controls passed; publication remains unproved.")
 
 
 if __name__ == "__main__":
