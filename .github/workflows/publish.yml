@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       source_commit:
-        description: Exact verified main commit
+        description: Verified source commit (current main; retained e8248182 for resume)
         required: true
         type: string
       operation:
@@ -12,11 +12,12 @@ on:
         required: true
         type: choice
         default: verify
-        options: [verify, publish]
+        options: [verify, publish, resume]
 
 permissions:
   contents: read
   checks: read
+  actions: read
 
 env:
   CARGO_INCREMENTAL: "0"
@@ -40,7 +41,12 @@ jobs:
           nix_conf: |
             experimental-features = nix-command flakes
       - name: Release the exact verified source
-        run: nix develop -c bash ci/publish-release.sh
+        run: |
+          if [[ "${{ inputs.operation }}" == resume ]]; then
+            nix develop -c bash ci/resume-release.sh
+          else
+            nix develop -c bash ci/publish-release.sh
+          fi
         env:
           EXPECTED_SOURCE_COMMIT: ${{ inputs.source_commit }}
           RELEASE_OPERATION: ${{ inputs.operation }}
@@ -55,5 +61,10 @@ jobs:
             target/package/tmp-crate/bombay-*.crate
             target/package/audited-cohort.json
             target/package/registry-receipts.json
+            target/retained-source/target/package/tmp-crate/bombay-*.crate
+            target/retained-source/target/package/audited-cohort.json
+            target/retained-source/target/package/remaining-cohort.json
+            target/retained-source/target/package/registry-receipts.json
+            target/first-release/run.json
           if-no-files-found: ignore
           retention-days: 14

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+PYTHONDONTWRITEBYTECODE=1 python3 ci/release_cohort_tests.py
+
 # This entrypoint must run through the repository's pinned Nix development shell.
 release_packages=(
   bombay-validated-struct-macros bombay-validated-struct
