@@ -11,20 +11,33 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
-use std::sync::Arc;
+use std::{
+    env,
+    io::{self, BufRead, Write},
+    path::Path,
+    process::{ChildStdin, Command, Stdio},
+    sync::Arc,
+    time::Duration,
+};
 
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use tokio::time::{sleep, timeout};
 use zenoh_config::Config;
 use zenoh_core::zlock;
 use zenoh_protocol::{
     core::{key_expr::keyexpr, ExprId, Region, Reliability, WhatAmI, WireExpr, EMPTY_EXPR_ID},
     network::{
-        declare::queryable::ext::QueryableInfoType,
+        declare::{self, queryable::ext::QueryableInfoType},
         ext::{self, NodeIdType},
         request::ext::QueryTarget,
-        Declare, DeclareBody, DeclareKeyExpr, Mapping, Push, Request, Response, UndeclareKeyExpr,
+        Declare, DeclareBody, DeclareKeyExpr, Mapping, NetworkBody, NetworkMessage, Push, Request,
+        Response, UndeclareKeyExpr,
     },
     zenoh::{PushBody, Put, RequestBody, ResponseBody},
 };
+use zenoh_result::{bail, ZResult};
+use zenoh_transport::unicast::TransportUnicast;
 
 use crate::{
     key_expr::KeyExpr,
@@ -41,7 +54,308 @@ use crate::{
             RoutingContext,
         },
     },
+    Config as SessionConfig, Session,
 };
+
+const DECLARATION_NAMESPACE: &str = "research/pressure/outside";
+const DECLARATION_WAIT: Duration = Duration::from_secs(5);
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum DeclarationCommand {
+    Extend,
+    Release,
+    Exit,
+}
+
+#[derive(Debug)]
+enum DeclarationScheduling {
+    Queued,
+    NotQueued,
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct DeclarationInventory {
+    remote_mappings: usize,
+    mapped_expression_bytes: usize,
+    namespace_nodes: usize,
+    stored_expression_bytes: usize,
+    string_capacity_bytes: usize,
+}
+
+fn declaration_config(
+    mode: WhatAmI,
+    listen: Vec<&str>,
+    connect: Vec<&str>,
+    certificates: &Path,
+) -> ZResult<SessionConfig> {
+    SessionConfig::from_json5(
+        &json!({
+            "mode": mode,
+            "listen": { "endpoints": listen },
+            "connect": { "endpoints": connect, "timeout_ms": 2000, "exit_on_failure": true },
+            "scouting": {
+                "multicast": { "enabled": false, "listen": false },
+                "gossip": { "enabled": false }
+            },
+            "transport": { "link": { "protocols": ["tls"], "tls": {
+                "root_ca_certificate": certificates.join("root-ca.pem"),
+                "listen_certificate": certificates.join("localhost-certificate.pem"),
+                "listen_private_key": certificates.join("localhost-private-key.pem"),
+                "connect_certificate": certificates.join("localhost-certificate.pem"),
+                "connect_private_key": certificates.join("localhost-private-key.pem"),
+                "enable_mtls": true, "verify_name_on_connect": true, "use_public_pki": false
+            } } }
+        })
+        .to_string(),
+    )
+}
+
+fn declaration_inventory(session: &Session) -> DeclarationInventory {
+    let gateway = session.runtime().static_runtime().unwrap().router();
+    let tables = gateway.tables.tables.read().unwrap();
+    let mut inventory = DeclarationInventory::default();
+    for face in tables.data.faces.values() {
+        for resource in face.remote_mappings.values() {
+            if resource
+                .expr
+                .strip_prefix(DECLARATION_NAMESPACE)
+                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+            {
+                inventory.remote_mappings += 1;
+                inventory.mapped_expression_bytes += resource.expr.len();
+            }
+        }
+    }
+    // Borrowing under this lock leaves native strong-count cleanup unchanged.
+    let mut resources = vec![tables.data._get_root().as_ref()];
+    while let Some(resource) = resources.pop() {
+        if resource
+            .expr
+            .strip_prefix(DECLARATION_NAMESPACE)
+            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+        {
+            inventory.namespace_nodes += 1;
+            inventory.stored_expression_bytes += resource.expr.len();
+            inventory.string_capacity_bytes += resource.expr.capacity();
+        }
+        resources.extend(resource.children.iter().map(|child| child.as_ref()));
+    }
+    inventory
+}
+
+async fn await_declaration_inventory(
+    session: &Session,
+    expected_mappings: usize,
+) -> ZResult<DeclarationInventory> {
+    let observed = timeout(DECLARATION_WAIT, async {
+        loop {
+            let inventory = declaration_inventory(session);
+            if inventory.remote_mappings == expected_mappings {
+                return inventory;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    match observed {
+        Ok(inventory) => Ok(inventory),
+        Err(expiry) => bail!(
+            "expected {expected_mappings} remote mappings; observed {:?}: {expiry}",
+            declaration_inventory(session)
+        ),
+    }
+}
+
+fn request_declarations(stdin: &mut ChildStdin, command: DeclarationCommand) -> ZResult<()> {
+    serde_json::to_writer(&mut *stdin, &command)?;
+    stdin.write_all(b"\n")?;
+    stdin.flush()?;
+    Ok(())
+}
+
+fn schedule_declaration(
+    transport: &TransportUnicast,
+    body: DeclareBody,
+) -> ZResult<DeclarationScheduling> {
+    let mut message: NetworkMessage = NetworkBody::Declare(Declare {
+        interest_id: None,
+        ext_qos: declare::ext::QoSType::DECLARE,
+        ext_tstamp: None,
+        ext_nodeid: declare::ext::NodeIdType::DEFAULT,
+        body,
+    })
+    .into();
+    transport
+        .schedule(message.as_mut())
+        .map(|queued| match queued {
+            true => DeclarationScheduling::Queued,
+            false => DeclarationScheduling::NotQueued,
+        })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "producer subprocess selected by the owning declaration-pressure test"]
+async fn declaration_producer() {
+    let config =
+        SessionConfig::from_json5(&env::var("BOMBAY_DECLARATION_CONFIG").unwrap()).unwrap();
+    let session = crate::open(config).await.unwrap();
+    let transports = session.runtime().static_runtime().unwrap().manager();
+    let mut transport = None;
+    let mut declarations = Vec::new();
+    let mut declaration_receipts = Vec::new();
+    let mut undeclaration_receipts = Vec::new();
+    let work: ZResult<()> = async {
+        transport = Some(
+            timeout(DECLARATION_WAIT, async {
+                loop {
+                    if let Some(transport) = transports.get_transports_unicast().await.pop() {
+                        return transport;
+                    }
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await?,
+        );
+        let transport = transport.as_ref().unwrap();
+        for line in io::stdin().lock().lines() {
+            match serde_json::from_str::<DeclarationCommand>(&line?)? {
+                DeclarationCommand::Extend => {
+                    let next = declarations.len();
+                    for index in next..next + 8 {
+                        let id = ExprId::try_from(40000 + index)?;
+                        declaration_receipts.push(schedule_declaration(
+                            transport,
+                            DeclareBody::DeclareKeyExpr(DeclareKeyExpr {
+                                id,
+                                wire_expr: format!("{DECLARATION_NAMESPACE}/{index:08}").into(),
+                            }),
+                        ));
+                        declarations.push(id);
+                    }
+                }
+                DeclarationCommand::Release => {
+                    for id in declarations.drain(..) {
+                        undeclaration_receipts.push(schedule_declaration(
+                            transport,
+                            DeclareBody::UndeclareKeyExpr(UndeclareKeyExpr { id }),
+                        ));
+                    }
+                }
+                DeclarationCommand::Exit => break,
+            }
+        }
+        Ok(())
+    }
+    .await;
+    // Independent cleanup still runs after control or declaration failure.
+    if let Some(transport) = transport {
+        for id in declarations {
+            undeclaration_receipts.push(schedule_declaration(
+                &transport,
+                DeclareBody::UndeclareKeyExpr(UndeclareKeyExpr { id }),
+            ));
+        }
+    }
+    let session_close = session.close().await;
+    assert!(work.is_ok() && declaration_receipts.iter().all(|receipt| matches!(receipt, Ok(DeclarationScheduling::Queued)))
+        && undeclaration_receipts.iter().all(|receipt| matches!(receipt, Ok(DeclarationScheduling::Queued))) && session_close.is_ok(),
+        "producer work: {work:?}; native declarations: {declaration_receipts:?}; native undeclarations: {undeclaration_receipts:?}; session close: {session_close:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires BOMBAY_DECLARATION_CERTIFICATES containing the public TLS fixture"]
+async fn declarations_outside_acl_retain_resources() {
+    let certificates = env::var("BOMBAY_DECLARATION_CERTIFICATES").unwrap();
+    let certificates = Path::new(&certificates);
+    for owner_mode in [WhatAmI::Peer, WhatAmI::Router] {
+        let producer_mode = match owner_mode {
+            WhatAmI::Peer => WhatAmI::Peer,
+            WhatAmI::Router => WhatAmI::Client,
+            WhatAmI::Client => unreachable!("the owner must receive declarations"),
+        };
+        let mut config =
+            declaration_config(owner_mode, vec!["tls/127.0.0.1:0"], vec![], certificates).unwrap();
+        config
+            .insert_json5(
+                "access_control",
+                &json!({
+                    "enabled": true, "default_permission": "deny",
+                    "rules": [{ "id": "health", "permission": "allow",
+                        "flows": ["ingress", "egress"], "messages": ["put", "declare_subscriber"],
+                        "key_exprs": ["research/pressure/health"] }],
+                    "subjects": [{ "id": "all" }],
+                    "policies": [{ "rules": ["health"], "subjects": ["all"] }]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        let session = crate::open(config).await.unwrap();
+        let mut inventories = Vec::new();
+        let mut producer = None;
+        let mut producer_stdin = None;
+        let work: ZResult<()> = async {
+            let locators = session.runtime().static_runtime().unwrap().get_locators();
+            let port = locators
+                .first()
+                .ok_or("no TLS listener locator")?
+                .address()
+                .as_str()
+                .rsplit(':')
+                .next()
+                .ok_or("no TLS listener port")?;
+            let address = format!("tls/localhost:{port}");
+            let producer_config =
+                declaration_config(producer_mode, vec![], vec![&address], certificates)?;
+            let mut child = Command::new(env::current_exe()?)
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "net::tests::tables::declaration_producer",
+                    "--nocapture",
+                ])
+                .env(
+                    "BOMBAY_DECLARATION_CONFIG",
+                    serde_json::to_string(&producer_config)?,
+                )
+                .stdin(Stdio::piped())
+                .spawn()?;
+            producer_stdin = child.stdin.take();
+            producer = Some(child);
+            let stdin = producer_stdin.as_mut().ok_or("missing producer stdin")?;
+            for expected in [8, 16] {
+                request_declarations(stdin, DeclarationCommand::Extend)?;
+                inventories.push(await_declaration_inventory(&session, expected).await?);
+            }
+            request_declarations(stdin, DeclarationCommand::Release)?;
+            inventories.push(await_declaration_inventory(&session, 0).await?);
+            Ok(())
+        }
+        .await;
+        let exit_request = producer_stdin
+            .as_mut()
+            .map(|stdin| request_declarations(stdin, DeclarationCommand::Exit));
+        drop(producer_stdin);
+        let producer_exit = producer.as_mut().map(|child| child.wait());
+        let final_inventory = declaration_inventory(&session);
+        let session_close = session.close().await;
+        // This proves retained growth and native restoration, not enforced bounds,
+        // whole-heap memory, or retirement of every transport callback.
+        println!("{owner_mode:?}: inventories={inventories:?}; final={final_inventory:?}");
+        assert!(work.is_ok() && matches!(exit_request, Some(Ok(())))
+            && matches!(producer_exit, Some(Ok(status)) if status.success()) && session_close.is_ok(),
+            "work: {work:?}; exit request: {exit_request:?}; producer exit: {producer_exit:?}; session close: {session_close:?}");
+        for (inventory, expected) in inventories[..2].iter().zip([8, 16]) {
+            assert_eq!(inventory.remote_mappings, expected);
+            assert_eq!(inventory.mapped_expression_bytes, expected * 34);
+            assert_eq!(inventory.namespace_nodes, expected + 1);
+            assert_eq!(inventory.stored_expression_bytes, 25 + expected * 34);
+            assert!(inventory.string_capacity_bytes >= inventory.stored_expression_bytes);
+        }
+        assert_eq!(inventories[2], DeclarationInventory::default());
+        assert_eq!(final_inventory, DeclarationInventory::default());
+    }
+}
 
 fn new_router() -> Gateway {
     let mut config = Config::default().expanded();

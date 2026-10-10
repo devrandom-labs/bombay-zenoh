@@ -35,6 +35,12 @@ for profile in debug release; do
   cargo clippy --locked --jobs 2 "${build_arguments[@]}" \
     -p bombay-zenoh-transport --test unicast_openclose \
     --no-default-features --features transport_tls,test -- -D warnings
+  BOMBAY_DECLARATION_CERTIFICATES="$PWD/zenoh/tests/fixtures/declaration-pressure" \
+    cargo test --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib \
+      --no-default-features --features transport_tls \
+      net::tests::tables::declarations_outside_acl_retain_resources -- --ignored --exact --nocapture
+  cargo clippy --locked --jobs 2 "${build_arguments[@]}" \
+    -p bombay-zenoh --lib --tests --no-default-features --features transport_tls -- -D warnings
   cargo clippy --locked --jobs 2 "${build_arguments[@]}" \
     "${package_arguments[@]}" --lib --features json_get,json5 -- -D warnings
   for features in transport_tls transport_tls,internal transport_tls,unstable \
