@@ -274,8 +274,10 @@ async fn declarations_outside_acl_retain_resources() {
             WhatAmI::Router => WhatAmI::Client,
             WhatAmI::Client => unreachable!("the owner must receive declarations"),
         };
+        // Native TLS selects the first resolved address, so bind and connect
+        // must use the same hostname to preserve the loopback address family.
         let mut config =
-            declaration_config(owner_mode, vec!["tls/127.0.0.1:0"], vec![], certificates).unwrap();
+            declaration_config(owner_mode, vec!["tls/localhost:0"], vec![], certificates).unwrap();
         config
             .insert_json5(
                 "access_control",
