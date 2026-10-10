@@ -77,11 +77,15 @@ version before publishing a dependent:
 6. `bombay-zenoh-transport` 1.10.1.
 7. `bombay-zenoh` 1.10.1.
 
-For each owner, use its owning manifest and the pinned shell:
-
-```sh
-nix develop -c cargo publish --locked --manifest-path dependencies/validated-struct-macros/Cargo.toml
-```
+The manual workflow prepares all nine publication candidates with Cargo's same
+selected `json_get,json5` feature graph. It audits their exact source revision,
+normalized manifests and all 29 corrected archived lock checksums. Publication
+uses one standard Cargo multi-package invocation; Cargo owns dependency ordering
+and registry visibility waits. A private credential executable uses the owning
+`cargo-credential` 0.4.11 SDK. Its registry-specific configuration excludes other
+credential providers, and each publication receives an uncached credential only
+after the actual retained tarball digest matches the audited cohort. The SDK owns
+all credential IPC; this executable defines no upload or authentication format.
 
 Do not bypass package verification or publish from an unreviewed revision.
 Record the published archive checksum and source commit for every package.
@@ -99,6 +103,9 @@ checks exact current main, required successful CI and actual package archives;
 it does not claim to authenticate the token. Ordinary Cargo/crates.io verifies
 actual authority for the exact package before registry writes during the explicitly
 selected `publish` operation. Authentication or scope refusal stops subsequent
-publication without bypassing the owning registry checks. Earlier successful
-publications, if any, remain recorded separately from later failures.
+publication without bypassing the owning registry checks. Before and after registry
+receipts retain every established uploaded prefix, including a later refusal.
+Cargo rejects already registered selected versions rather than silently skipping
+them. A partial-cohort retry therefore needs a separately prepared, reviewed
+selection preserving the original audited artifacts; the release is not atomic.
 No registry publication, release tag or completed feature delivery is recorded here.

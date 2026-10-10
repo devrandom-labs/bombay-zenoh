@@ -2,6 +2,8 @@
 
 import copy
 import hashlib
+import json
+import subprocess
 import sys
 import tarfile
 import tomllib
@@ -131,7 +133,7 @@ def read_archive(archive, prefix):
     return contents
 
 
-def verify_archive(root, archives, owner):
+def verify_archive(root, archives, owner, revision):
     prefix = identity(owner) + "-" + version(owner)
     contents = read_archive(archives / (prefix + ".crate"), prefix)
     manifest = tomllib.loads(contents["Cargo.toml"].decode())
@@ -148,6 +150,10 @@ def verify_archive(root, archives, owner):
                 if "target" not in path.relative_to(directory).parts}
     actual = {path: payload for path, payload in contents.items() if path.endswith(".rs")}
     require(actual == expected, f"{owner}: Rust source inventory or bytes differ")
+    vcs = json.loads(contents[".cargo_vcs_info.json"])
+    require(vcs["git"]["sha1"] == revision, f"{owner}: archive source commit")
+    require(not vcs["git"].get("dirty", False), f"{owner}: dirty archive source")
+    require(vcs["path_in_vcs"] == directory.relative_to(root).as_posix(), f"{owner}: archive source owner")
     license_path = manifest["package"].get("license-file", "LICENSE")
     require(contents[license_path] == (root / "LICENSE").read_bytes(), f"{owner}: license bytes")
     require(hashlib.sha256(contents[license_path]).hexdigest() == LICENSE_SHA256, f"{owner}: upstream license")
@@ -159,9 +165,97 @@ def verify_archive(root, archives, owner):
     return manifest
 
 
+def verify_lock(owner, lock, checksums):
+    source_names = [package["name"] for package in lock["package"] if "source" not in package]
+    require(source_names == [identity(owner)], f"{owner}: locked owning source node")
+    controlled_names = {identity(dependency): dependency for dependency in EDGES}
+    edges = []
+    for package in lock["package"]:
+        name = package["name"]
+        require(name not in EDGES, f"{owner}: original locked dependency {name}")
+        if not name.startswith("bombay-"):
+            continue
+        controlled = controlled_names.get(name)
+        require(controlled in EDGES, f"{owner}: unexpected locked package {name}")
+        require(package["version"] == version(controlled), f"{owner}: locked version {name}")
+        if "source" not in package:
+            require(name == identity(owner), f"{owner}: nonregistry locked dependency {name}")
+            continue
+        require(package["source"] == "registry+https://github.com/rust-lang/crates.io-index",
+                f"{owner}: locked registry {name}")
+        require(package.get("checksum") == checksums[name], f"{owner}: locked checksum {name}")
+        require(name != identity(owner), f"{owner}: registry self edge")
+        edges.append(name)
+    expected = set(EDGES[owner])
+    remaining = list(expected)
+    while remaining:
+        dependency = remaining.pop()
+        for descendant in EDGES[dependency] - expected:
+            expected.add(descendant)
+            remaining.append(descendant)
+    require(set(edges) == {identity(dependency) for dependency in expected},
+            f"{owner}: controlled lock closure")
+    require(len(edges) == len(expected), f"{owner}: duplicate controlled locked package")
+    controlled_nodes = {package["name"]: package for package in lock["package"]
+                        if package["name"].startswith("bombay-")}
+    for name, package in controlled_nodes.items():
+        references = set()
+        for reference in package.get("dependencies", []):
+            parts = reference.split()
+            require(parts and parts[0] not in EDGES, f"{owner}: locked dependency edges")
+            if not parts[0].startswith("bombay-"):
+                continue
+            target = controlled_nodes.get(parts[0])
+            require(target is not None and len(parts) <= 3 and parts[0] not in references
+                    and (len(parts) < 2 or parts[1] == target["version"])
+                    and (len(parts) < 3 or parts[2] == "(" + target.get("source", "") + ")"),
+                    f"{owner}: locked dependency edges")
+            references.add(parts[0])
+        require(name in controlled_names, f"{owner}: unexpected locked package {name}")
+        require(references == {identity(dependency) for dependency in EDGES[controlled_names[name]]},
+                f"{owner}: locked dependency edges")
+    return edges
+
+
 def main():
-    root, archives = map(Path, sys.argv[1:])
-    manifests = {owner: verify_archive(root, archives, owner) for owner in EDGES}
+    root, archives = map(Path, sys.argv[1:3])
+    revision = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    manifests = {owner: verify_archive(root, archives, owner, revision) for owner in EDGES}
+    checksums = {identity(owner): hashlib.sha256(
+        (archives / (identity(owner) + "-" + version(owner) + ".crate")).read_bytes()).hexdigest()
+        for owner in EDGES}
+    locks = {owner: tomllib.loads(read_archive(
+        archives / (identity(owner) + "-" + version(owner) + ".crate"),
+        identity(owner) + "-" + version(owner))["Cargo.lock"].decode()) for owner in EDGES}
+    edge_count = sum(len(verify_lock(owner, lock, checksums)) for owner, lock in locks.items())
+    require(edge_count == 29, "controlled archived checksum edge inventory changed")
+    for defect in ("checksum", "identity", "closure", "reference"):
+        mutant = copy.deepcopy(locks["zenoh-config"])
+        dependency = next(package for package in mutant["package"]
+                          if package["name"] == "bombay-validated-struct")
+        if defect == "checksum":
+            dependency["checksum"] = "0" * 64
+            diagnostic = "locked checksum bombay-validated-struct"
+        elif defect == "identity":
+            dependency["name"] = "validated_struct"
+            diagnostic = "original locked dependency validated_struct"
+        elif defect == "closure":
+            mutant["package"].remove(dependency)
+            diagnostic = "controlled lock closure"
+        else:
+            source = next(package for package in mutant["package"]
+                          if package["name"] == identity("zenoh-config"))
+            source["dependencies"].remove(identity("validated_struct"))
+            diagnostic = "locked dependency edges"
+        try:
+            verify_lock("zenoh-config", mutant, checksums)
+        except ValueError as refused:
+            require(diagnostic in str(refused), f"wrong lock inversion diagnostic: {refused}")
+            print(f"intended lock {defect} inversion refused: {refused}")
+        else:
+            raise ValueError(f"lock {defect} inversion unexpectedly accepted")
+        verify_lock("zenoh-config", locks["zenoh-config"], checksums)
+    print(f"Verified {edge_count} controlled archived registry checksum edges.")
     for owner, defect in (("zenoh-config", "dependency"), ("zenoh", "feature")):
         mutant = copy.deepcopy(manifests[owner])
         if defect == "dependency":
@@ -177,7 +271,11 @@ def main():
             print(f"intended {defect} inversion refused: {refused}")
         else:
             raise ValueError(f"{defect} inversion unexpectedly accepted")
-        verify_archive(root, archives, owner)
+        verify_archive(root, archives, owner, revision)
+    if len(sys.argv) == 4:
+        cohort = {identity(owner): {"version": version(owner), "checksum": checksums[identity(owner)]}
+                  for owner in EDGES}
+        Path(sys.argv[3]).write_text(json.dumps(cohort, sort_keys=True) + "\n")
     print("Nine actual archives and restored archive controls passed; publication remains unproved.")
 
 

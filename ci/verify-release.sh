@@ -13,11 +13,15 @@ for package in "${release_packages[@]}"; do
 done
 
 cargo fmt "${package_arguments[@]}" -- --check
+cargo fmt --manifest-path ci/release-credential/Cargo.toml -- --check
 for profile in debug release; do
   build_arguments=()
   if [[ "$profile" == release ]]; then
     build_arguments+=(--release)
   fi
+  cargo test --manifest-path ci/release-credential/Cargo.toml --locked --jobs 2 "${build_arguments[@]}"
+  cargo clippy --manifest-path ci/release-credential/Cargo.toml --locked --jobs 2 \
+    "${build_arguments[@]}" --all-targets -- -D warnings
   cargo test --locked --jobs 2 "${build_arguments[@]}" \
     -p bombay-zenoh-link-tls outgoing_tls_trust_tests -- --test-threads=1
   cargo test --locked --jobs 2 "${build_arguments[@]}" \

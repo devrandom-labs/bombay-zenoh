@@ -1,0 +1,16 @@
+[package]
+name = "bombay-release-credential"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+cargo-credential = "=0.4.11"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+[lints.clippy]
+debug_assert_with_mut_call = "deny"
+let_underscore_must_use = "deny"
