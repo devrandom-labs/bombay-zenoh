@@ -879,6 +879,7 @@ impl fmt::Debug for Runtime {
 #[derive(Clone)]
 pub struct DynamicRuntime(Arc<dyn IRuntime>);
 
+#[cfg(feature = "unstable")]
 impl DynamicRuntime {
     pub(crate) fn downgrade(&self) -> WeakDynamicRuntime {
         WeakDynamicRuntime(Arc::downgrade(&self.0))
@@ -914,9 +915,11 @@ impl StructVersion for DynamicRuntime {
 
 impl PluginStartArgs for DynamicRuntime {}
 
+#[cfg(feature = "unstable")]
 #[derive(Clone)]
 pub struct WeakDynamicRuntime(pub(crate) Weak<dyn IRuntime>);
 
+#[cfg(feature = "unstable")]
 impl WeakDynamicRuntime {
     pub(crate) fn upgrade(&self) -> Option<DynamicRuntime> {
         self.0.upgrade().map(DynamicRuntime)

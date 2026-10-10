@@ -18,52 +18,33 @@ description = "Internal crate for zenoh."
 edition = { workspace = true }
 homepage = { workspace = true }
 license = { workspace = true }
-name = "zenoh-link"
+license-file = { workspace = true }
+name = "bombay-zenoh-link"
 repository = { workspace = true }
 rust-version = { workspace = true }
 version = { workspace = true }
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-transport_quic = ["zenoh-link-quic"]
-transport_quic_datagram = ["zenoh-link-quic_datagram"]
-transport_serial = ["zenoh-link-serial"]
-transport_tcp = ["zenoh-config/transport_tcp", "zenoh-link-tcp"]
 transport_tls = ["zenoh-link-tls"]
-transport_udp = ["zenoh-link-udp"]
-transport_unixpipe = [
-  "zenoh-link-unixpipe",
-  "zenoh-link-unixpipe/transport_unixpipe",
-]
-transport_unixsock-stream = ["zenoh-link-unixsock_stream"]
-transport_vsock = ["zenoh-link-vsock"]
-transport_ws = ["zenoh-link-ws"]
-uring = [
-  "zenoh-link-commons/uring",
-  "zenoh-link-quic/uring",
-  "zenoh-link-quic_datagram/uring",
-  "zenoh-link-serial/uring",
-  "zenoh-link-tcp/uring",
-  "zenoh-link-tls/uring",
-  "zenoh-link-udp/uring",
-  "zenoh-link-unixpipe/uring",
-  "zenoh-link-unixsock_stream/uring",
-  "zenoh-link-vsock/uring",
-  "zenoh-link-ws/uring",
-]
 
 [dependencies]
 zenoh-config = { workspace = true }
 zenoh-link-commons = { workspace = true }
-zenoh-link-quic = { workspace = true, optional = true }
-zenoh-link-quic_datagram = { workspace = true, optional = true }
-zenoh-link-serial = { workspace = true, optional = true }
-zenoh-link-tcp = { workspace = true, optional = true }
 zenoh-link-tls = { workspace = true, optional = true }
-zenoh-link-udp = { workspace = true, optional = true }
-zenoh-link-unixpipe = { workspace = true, optional = true }
-zenoh-link-unixsock_stream = { workspace = true, optional = true }
-zenoh-link-vsock = { workspace = true, optional = true }
-zenoh-link-ws = { workspace = true, optional = true }
 zenoh-protocol = { workspace = true }
 zenoh-result = { workspace = true }
+
+[lib]
+name = "zenoh_link"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(feature, values("transport_quic", "transport_quic_datagram", "transport_serial", "transport_tcp", "transport_udp", "transport_unixpipe", "transport_unixsock-stream", "transport_vsock", "transport_ws", "uring"))',
+] }
+
+[package.metadata.bombay]
+upstream-repository = "https://github.com/eclipse-zenoh/zenoh"
+upstream-revision = "1211779c3647f5a96713dade452c546a07823580"
+controlled-repository = "https://github.com/devrandom-labs/bombay-zenoh"
+supported-profile = "tls-only"

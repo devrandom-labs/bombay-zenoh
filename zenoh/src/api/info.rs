@@ -483,6 +483,7 @@ pub struct TransportEvent {
 
 impl TransportEvent {
     /// Constructs an uninitialized empty TransportEvent.
+    #[cfg(feature = "unstable")]
     #[zenoh_macros::internal]
     pub fn empty() -> Self {
         TransportEvent {
@@ -526,6 +527,7 @@ pub struct LinkEvent {
 
 impl LinkEvent {
     /// Constructs an uninitialized empty LinkEvent.
+    #[cfg(feature = "unstable")]
     #[zenoh_macros::internal]
     pub fn empty() -> Self {
         LinkEvent {

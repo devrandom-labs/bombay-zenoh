@@ -1,0 +1,35 @@
+[package]
+name = "bombay-validated-struct"
+version = "2.2.0"
+edition = "2018"
+authors = ["Pierre Avital <pierre.avital@me.com>"]
+description = "Easily generate nested structures with getters and predicated setters"
+keywords = ["proc-macros"]
+license = "EPL-2.0 OR Apache-2.0"
+repository = "https://github.com/devrandom-labs/bombay-zenoh"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+json_get = ["validated_struct_macros/serde_json", "serde_json"]
+
+[dependencies]
+serde = "1.0"
+validated_struct_macros = { package = "bombay-validated-struct-macros", path = "../validated-struct-macros", version = "2.2.0", features = [
+	"serde",
+] }
+serde_json = { version = "1.0", optional = true }
+json5 = { version = "0.4.1", optional = true }
+
+[dev-dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[lib]
+name = "validated_struct"
+
+[package.metadata.bombay]
+upstream-repository = "https://github.com/p-avital/validated-struct-rs"
+upstream-revision = "9cd5eda2d2a90e84cf47f3e0cdfb21e1df9d6729"
+controlled-repository = "https://github.com/devrandom-labs/bombay-zenoh"
+supported-profile = "configuration-owner"

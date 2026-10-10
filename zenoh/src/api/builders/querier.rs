@@ -24,6 +24,8 @@ use zenoh_protocol::{
 use zenoh_result::ZResult;
 
 use super::sample::QoSBuilderTrait;
+#[cfg(any(feature = "internal", feature = "unstable"))]
+use crate::api::builders::sample::TimestampInstrumentationBuilderTrait;
 #[cfg(feature = "unstable")]
 use crate::api::cancellation::CancellationTokenBuilderTrait;
 #[cfg(feature = "unstable")]
@@ -32,9 +34,7 @@ use crate::api::sample::SourceInfo;
 use crate::api::timestamp_stack::TimestampInstrumentation;
 use crate::{
     api::{
-        builders::sample::{
-            EncodingBuilderTrait, SampleBuilderTrait, TimestampInstrumentationBuilderTrait,
-        },
+        builders::sample::{EncodingBuilderTrait, SampleBuilderTrait},
         bytes::ZBytes,
         cancellation::SyncGroup,
         encoding::Encoding,
@@ -318,6 +318,7 @@ impl<Handler> SampleBuilderTrait for QuerierGetBuilder<'_, '_, Handler> {
     }
 }
 
+#[cfg(any(feature = "internal", feature = "unstable"))]
 #[zenoh_macros::internal_trait]
 impl<Handler> TimestampInstrumentationBuilderTrait for QuerierGetBuilder<'_, '_, Handler> {
     #[zenoh_macros::unstable]

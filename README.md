@@ -1,3 +1,28 @@
+# Bombay controlled Zenoh dependency copy
+
+This local source is based on upstream revision
+`1211779c3647f5a96713dade452c546a07823580` (1.10.1). The controlled package
+identities and exact base revisions are recorded in their Cargo metadata;
+configuration-generator source custody is recorded in
+[dependencies/configuration-source.md](dependencies/configuration-source.md).
+The packages preserve their original Rust library names and upstream licenses.
+
+The selected published profile supports TLS only, enabled by default. Other
+transports, SHM, compression, multiple links, separate password/RSA authentication,
+plugins, statistics and additional task tracing are excluded Cargo options.
+Retained `internal`, `internal_config`, `unstable` and `test` flags are maintainer
+interfaces, available to Cargo consumers but unsupported for ordinary applications.
+The corrected TLS client can explicitly exclude public certificate roots;
+Bombay additionally requires mutual TLS, configured deployment roots and explicit
+addresses. Those deployment requirements are not implied by enabling TLS alone.
+
+Current supported-profile guidance is in `zenoh/README.md`.
+Inherited internal-owner README guidance is being reconciled before release.
+
+The upstream overview and links below describe the original project, whose
+full runtime profile and release status do not describe these controlled copies.
+This local source and its package rehearsals do not establish registry availability.
+
 <img src="https://raw.githubusercontent.com/eclipse-zenoh/zenoh/master/zenoh-dragon.png" height="150">
 
 [![CI](https://github.com/eclipse-zenoh/zenoh/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/eclipse-zenoh/zenoh/actions?query=workflow%3ACI+branch%3Amain++)

@@ -1,0 +1,412 @@
+#![allow(clippy::too_many_arguments)]
+
+use proc_macro::TokenStream;
+use quote::quote;
+use syn::{Attribute, Ident, Type};
+
+use structure::{FieldSpec, FieldType, StructSpec};
+
+mod structure;
+
+const SEPARATOR: char = if cfg!(feature = "dot_separator") {
+    '.'
+} else {
+    '/'
+};
+impl StructSpec {
+    fn structure(&self) -> impl quote::ToTokens {
+        unzip_n::unzip_n!(10);
+        let ident = &self.ident;
+        let mut notifying = false;
+        let sattrs: Vec<_> = self
+            .attrs
+            .iter()
+            .filter_map(|a| {
+                if a.path().is_ident("notifying") {
+                    notifying = true;
+                    None
+                } else {
+                    Some(a.clone())
+                }
+            })
+            .collect();
+        let (
+            fields,
+            args,
+            associations,
+            accessors,
+            constructor_validations,
+            constructor_rec_validations,
+            serde_match,
+            get_match,
+            json_get_match,
+            get_keys,
+        ) = self
+            .fields
+            .iter()
+            .map(|spec| {
+                let id = &spec.ident;
+                let field_name = id;
+                let ty = spec.ty.ty();
+                let predicate = spec.constraint.as_ref().map(|e| quote! {#e(&value)});
+                let str_id = format!("{}", id);
+                let set_id = quote::format_ident!("set_{}", id);
+                let validate_id = quote::format_ident!("validate_{}", id);
+                let validate_id_rec = quote::format_ident!("validate_{}_rec", id);
+                (
+                    field(spec, field_name),
+                    quote! {#id: #ty},
+                    quote! {#field_name},
+                    accessors(
+                        spec,
+                        id,
+                        field_name,
+                        &ty,
+                        &set_id,
+                        &validate_id,
+                        &validate_id_rec,
+                        &predicate,
+                    ),
+                    if predicate.is_some() {
+                        Some(quote! {Self::#validate_id(self.#id())})
+                    } else {
+                        None
+                    },
+                    quote! {Self::#validate_id_rec(self.#id())},
+                    serde_match(id, spec, &str_id, set_id, field_name),
+                    get_match(spec, id, &str_id, field_name),
+                    json_get_match(spec, id, &str_id, field_name),
+                    keys_match(spec, field_name, &str_id),
+                )
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .unzip_n_vec();
+        let serde_access =
+            serde_access(ident, &serde_match, &get_match, &get_keys, &json_get_match);
+        let constructor_validations = constructor_validations
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        main_implementation(
+            &sattrs,
+            ident,
+            &fields,
+            &constructor_validations,
+            &constructor_rec_validations,
+            &args,
+            &associations,
+            &accessors,
+            &serde_access,
+        )
+    }
+}
+
+fn main_implementation(
+    sattrs: &[Attribute],
+    ident: &Ident,
+    fields: &[proc_macro2::TokenStream],
+    constructor_validations: &[proc_macro2::TokenStream],
+    constructor_rec_validations: &[proc_macro2::TokenStream],
+    args: &[proc_macro2::TokenStream],
+    associations: &[proc_macro2::TokenStream],
+    accessors: &[proc_macro2::TokenStream],
+    serde_access: &Option<proc_macro2::TokenStream>,
+) -> proc_macro2::TokenStream {
+    quote! {
+        #(#sattrs)*
+        pub struct #ident {
+            #(#fields),*
+        }
+        impl #ident {
+            pub fn validate(&self) -> bool {
+                true #(&& #constructor_validations)*
+            }
+            fn validate_rec(&self) -> bool {
+                true #(&& #constructor_rec_validations)*
+            }
+            #[allow(clippy::too_many_arguments)]
+            pub fn new(#(#args),*) -> Result<Self, Self> {
+                let constructed = #ident {
+                    #(#associations),*
+                };
+                if constructed.validate() {Ok(constructed)} else {Err(constructed)}
+            }
+            #(#accessors)*
+        }
+        #serde_access
+    }
+}
+
+fn field(spec: &FieldSpec, field: &Ident) -> proc_macro2::TokenStream {
+    let ty = spec.ty.ty();
+    let attrs = &spec.attributes;
+    let vis = &spec.vis;
+    quote! {#(#attrs)* #vis #field: #ty}
+}
+
+fn serde_access(
+    ident: &Ident,
+    serde_match: &[proc_macro2::TokenStream],
+    get_match: &[proc_macro2::TokenStream],
+    get_keys: &[proc_macro2::TokenStream],
+    json_get_match: &[proc_macro2::TokenStream],
+) -> Option<proc_macro2::TokenStream> {
+    let get_json = cfg!(feature = "serde_json").then(|| {
+        quote! {
+            fn get_json(& self, key: &str) -> Result<String, validated_struct::GetError>{
+                match validated_struct::split_once(key, #SEPARATOR) {
+                    #(#json_get_match)*
+                    ("", key) if !key.is_empty() => self.get_json(key),
+                    _ => Err(validated_struct::GetError::NoMatchingKey),
+                }
+            }
+        }
+    });
+    cfg!(feature = "serde").then(|| quote! {
+        impl #ident {
+            pub fn from_deserializer<'d, D: serde::Deserializer<'d>>(
+                d: D,
+            ) -> Result<Self, Result<Self, D::Error>>
+            where
+                Self: serde::Deserialize<'d>,
+            {
+                match <Self as serde::Deserialize>::deserialize(d) {
+                    Ok(value) => {
+                        if value.validate_rec() {
+                            Ok(value)
+                        } else {
+                            Err(Ok(value))
+                        }
+                    }
+                    Err(e) => Err(Err(e)),
+                }
+            }
+        }
+        impl<'a> validated_struct::ValidatedMapAssociatedTypes<'a> for #ident {
+            type Accessor = &'a dyn std::any::Any;
+        }
+        impl validated_struct::ValidatedMap for #ident {
+            fn insert<'d, D: serde::Deserializer<'d>>(&mut self, key: &str, value: D) -> Result<(), validated_struct::InsertionError>
+            where
+                validated_struct::InsertionError: From<D::Error> {
+                if let Some(e) = match validated_struct::split_once(key, #SEPARATOR) {
+                    #(#serde_match)*
+                    ("", key) if !key.is_empty() => self.insert(key, value).err(),
+                    _ => Some("unknown key".into())
+                } {return Err(e)};
+                Ok(())
+            }
+            fn get<'a>(&'a self, key: &str) -> Result<&dyn std::any::Any, validated_struct::GetError>{
+                match validated_struct::split_once(key, #SEPARATOR) {
+                    #(#get_match)*
+                    ("", key) if !key.is_empty() => self.get(key),
+                    _ => Err(validated_struct::GetError::NoMatchingKey),
+                }
+            }
+            #get_json
+            type Keys = std::vec::Vec<String>;
+            fn keys(&self) -> Self::Keys {
+                let mut keys = std::vec::Vec::new();
+                #(#get_keys)*
+                keys
+            }
+        }
+    })
+}
+
+fn accessors(
+    spec: &FieldSpec,
+    id: &Ident,
+    field: &Ident,
+    ty: &Type,
+    set_id: &Ident,
+    validate_id: &Ident,
+    validate_id_rec: &Ident,
+    predicate: &Option<proc_macro2::TokenStream>,
+) -> proc_macro2::TokenStream {
+    let doc_attrs: Vec<_> = spec
+        .attributes
+        .iter()
+        .filter(|&attr| attr.path().is_ident("doc"))
+        .cloned()
+        .collect();
+    let validate_id_rec_impl =
+        implement_validation(spec, ty, predicate, validate_id_rec, validate_id);
+    match predicate {
+        Some(predicate) => quote! {
+            #[inline(always)]
+            #(#doc_attrs)*
+            pub fn #id(&self) -> & #ty {
+                &self.#field
+            }
+            #[allow(clippy::ptr_arg)]
+            pub fn #validate_id(value: &#ty) -> bool {
+                #predicate
+            }
+            #validate_id_rec_impl
+            #(#doc_attrs)*
+            pub fn #set_id(&mut self, mut value: #ty) -> Result<#ty, #ty> {
+                if Self::#validate_id(&value) {
+                    std::mem::swap(&mut self.#field, &mut value);
+                    Ok(value)
+                } else {
+                    Err(value)
+                }
+            }
+        },
+        None => quote! {
+            #[inline(always)]
+            #(#doc_attrs)*
+            pub fn #id(&self) -> & #ty {
+                &self.#field
+            }
+            #validate_id_rec_impl
+            #(#doc_attrs)*
+            pub fn #set_id(&mut self, mut value: #ty) -> Result<#ty, #ty> {
+                std::mem::swap(&mut self.#field, &mut value);
+                Ok(value)
+            }
+        },
+    }
+}
+
+fn keys_match(spec: &FieldSpec, field: &Ident, str_id: &str) -> proc_macro2::TokenStream {
+    match spec.ty {
+        FieldType::Concrete(_) => quote! {keys.push(#str_id.into());},
+        FieldType::Structure(_) => quote! {
+            keys.push(#str_id.into());
+            keys.extend(self.#field.keys().into_iter().map(|s|format!("{}{}{}",#str_id, #SEPARATOR, s.as_str())));
+        },
+    }
+}
+
+fn get_match(
+    spec: &FieldSpec,
+    id: &Ident,
+    str_id: &str,
+    field: &Ident,
+) -> proc_macro2::TokenStream {
+    let get_exact = quote! {(#str_id, "") => Ok(self.#id() as &dyn std::any::Any),};
+    if spec.recursive_accessors() {
+        quote! {
+            #get_exact
+            (#str_id, key) => self.#field.get(key),
+        }
+    } else {
+        get_exact
+    }
+}
+
+fn json_get_match(
+    spec: &FieldSpec,
+    id: &Ident,
+    str_id: &str,
+    field: &Ident,
+) -> proc_macro2::TokenStream {
+    let get_exact = quote! {(#str_id, "") => serde_json::to_string(self.#id()).map_err(|e| validated_struct::GetError::Other(e.into())),};
+    if spec.recursive_accessors() {
+        quote! {
+            #get_exact
+            (#str_id, key) => self.#field.get_json(key),
+        }
+    } else {
+        get_exact
+    }
+}
+
+fn serde_match(
+    id: &Ident,
+    spec: &FieldSpec,
+    str_id: &str,
+    set_id: Ident,
+    field: &Ident,
+) -> proc_macro2::TokenStream {
+    let serde_set_err = format!("Predicate rejected value for {}", id);
+    let set_exact = quote! {
+        (#str_id, "") => self.#set_id(serde::Deserialize::deserialize(value)?).is_err().then(||#serde_set_err.into()),
+    };
+    if spec.recursive_accessors() {
+        quote! {
+            #set_exact
+            (#str_id, key) => self.#field.insert(key, value).err(),
+        }
+    } else {
+        set_exact
+    }
+}
+
+fn implement_validation(
+    f: &FieldSpec,
+    ty: &Type,
+    predicate: &Option<proc_macro2::TokenStream>,
+    validate_id_rec: &Ident,
+    validate_id: &Ident,
+) -> proc_macro2::TokenStream {
+    if let FieldType::Structure(_) = f.ty {
+        match predicate {
+            Some(predicate) => quote! {
+                fn #validate_id_rec(value: &#ty) -> bool {
+                    value.validate_rec() && #predicate
+                }
+            },
+            None => quote! {
+                fn #validate_id_rec(value: &#ty) -> bool {
+                    value.validate_rec()
+                }
+            },
+        }
+    } else {
+        let validate_rec_inner = match *predicate {
+            Some(_) => quote! {Self::#validate_id(value)},
+            None => quote! {true},
+        };
+        quote! {
+            #[allow(clippy::ptr_arg)]
+            fn #validate_id_rec(value: &#ty) -> bool {
+                #validate_rec_inner
+            }
+        }
+    }
+}
+
+#[proc_macro]
+pub fn validator(stream: TokenStream) -> TokenStream {
+    let spec: StructSpec = syn::parse(stream).unwrap();
+    let structure: Vec<_> = spec.flatten().iter().map(StructSpec::structure).collect();
+    (quote! {
+        #(#structure)*
+    })
+    .into()
+}
+
+#[cfg(test)]
+mod constructor_tests {
+    use super::StructSpec;
+    use quote::ToTokens;
+    use syn::{parse_quote, ExprStruct, File, ImplItem, Item, Stmt};
+    #[test]
+    fn constructor_spelling_preserves_complete_field_associations() {
+        let source: StructSpec = parse_quote! { Service { port: u16, label: String } };
+        let mut syntax: File = syn::parse2(source.structure().to_token_stream()).unwrap();
+        let Item::Impl(mut implementation) = syntax.items.remove(1) else {
+            panic!("expected owning implementation")
+        };
+        let ImplItem::Fn(mut constructor) = implementation.items.remove(2) else {
+            panic!("expected constructor")
+        };
+        let Stmt::Local(constructed) = constructor.block.stmts.remove(0) else {
+            panic!("expected constructed value")
+        };
+        let mut actual: ExprStruct =
+            syn::parse2(constructed.init.unwrap().expr.to_token_stream()).unwrap();
+        let mut expected: ExprStruct = parse_quote! { Service { port: port, label: label } };
+        for field in actual.fields.iter_mut().chain(expected.fields.iter_mut()) {
+            field.colon_token = None;
+        }
+        assert_eq!(
+            actual.to_token_stream().to_string(),
+            expected.to_token_stream().to_string()
+        );
+    }
+}

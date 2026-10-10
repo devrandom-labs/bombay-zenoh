@@ -1,0 +1,31 @@
+[package]
+name = "bombay-validated-struct-macros"
+version = "2.2.0"
+edition = "2018"
+authors = ["Pierre Avital <pierre.avital@me.com>"]
+description = "Macros for validated_struct"
+keywords = ["proc-macros"]
+license = "EPL-2.0 OR Apache-2.0"
+repository = "https://github.com/devrandom-labs/bombay-zenoh"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+serde = []
+serde_json = []
+dot_separator = []
+
+[dependencies]
+proc-macro2 = "1"
+syn = { version = "2", features = ["full"] }
+quote = "1.0.2"
+unzip-n = "0.1.2"
+
+[lib]
+name = "validated_struct_macros"
+proc-macro = true
+
+[package.metadata.bombay]
+upstream-repository = "https://github.com/p-avital/validated-struct-macros-rs"
+upstream-revision = "3eebb3c2e9147ac6c7c8cde987d89b22c9ab098a"
+controlled-repository = "https://github.com/devrandom-labs/bombay-zenoh"
+supported-profile = "configuration-owner"

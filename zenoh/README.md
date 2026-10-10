@@ -1,102 +1,36 @@
-<img src="https://raw.githubusercontent.com/eclipse-zenoh/zenoh/master/zenoh-dragon.png" height="150">
+# Bombay-maintained Zenoh transport dependency
 
-# Eclipse Zenoh
+This controlled copy is based on Eclipse Zenoh 1.10.1, upstream revision
+`1211779c3647f5a96713dade452c546a07823580`. It preserves the original Rust library
+name `zenoh`, upstream attribution and the `EPL-2.0 OR Apache-2.0` license.
+Exact provenance is included in the package's `package.metadata.bombay` fields.
 
-Eclipse Zenoh: Zero Overhead Pub/Sub, Store/Query and Compute.
+The supported runtime profile is TLS only, enabled by default. Core
+publish/subscribe, query/reply, key expressions, ordinary logging and the
+existing session API remain available. Other transports, SHM, compression,
+multiple links, separate password/RSA authentication, plugins, statistics and
+additional task tracing are excluded Cargo options.
 
-Zenoh (pronounce _/zeno/_) unifies data in motion, data at rest and computations. It carefully blends traditional pub/sub with geo-distributed storages, queries and computations, while retaining a level of time and space efficiency that is well beyond any of the mainstream stacks.
+The existing `internal`, `internal_config`, `unstable` and `test` flags are
+retained maintainer interfaces. Cargo consumers can enable them, but they are
+unsupported for ordinary Bombay applications.
 
-Check the website [zenoh.io](http://zenoh.io) for more information and [installation instructions](https://zenoh.io/docs/getting-started/installation/)
+The corrected outgoing TLS client supports explicit deployment-root-only trust
+selection. Bombay's approved deployment requires mutual TLS, configured deployment
+roots with public-root fallback disabled, and explicit TLS connection/listen
+addresses with multicast and gossip discovery disabled. Enabling the transport
+feature alone does not configure those deployment requirements. Actor admission
+and identity policies belong to the Bombay integration.
 
-See also the [roadmap](https://github.com/eclipse-zenoh/roadmap) for more detailed technical information.
-
-# Zenoh Rust API
-
-The crate `zenoh` provides the main implementation of the Zenoh network protocol in Rust and the [API](https://docs.rs/zenoh/latest/zenoh/) to use it.
-
-The primary features of Zenoh are
-
-* Arbitrary network topology support
-* Publish-subscribe and query-reply paradigms
-* Support for a great variety of underlying network protocols
-* Hierarchical keys with glob support (key expressions)
-* Zero-copy data buffers
-* Scouting for nodes in the network
-* Monitor data availability (liveliness)
-* Monitor the interest to published data (matching)
-* Shared memory support
-* Compact and efficient platform-independent data serialization and deserialization (in [zenoh-ext](../zenoh-ext))
-* Components for reliable data publishing with retransmissions (AdvancedSubscriber in [zenoh-ext](../zenoh-ext))
-
-# Usage Examples
-
-## Publish and subscribe
-
-Publishing data:
-
-```rust
-#[tokio::main]
-async fn main() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    session.put("key/expression", "value").await.unwrap();
-    session.close().await.unwrap();
-}
-```
-
-Subscribing to data:
-
-```rust
-use futures::prelude::*;
-#[tokio::main]
-async fn main() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let subscriber = session.declare_subscriber("key/expression").await.unwrap();
-    while let Ok(sample) = subscriber.recv_async().await {
-        println!("Received: {:?}", sample);
-    };
-}
-```
-
-## Query and reply
-
-Declare a queryable:
-
-```rust
-#[tokio::main]
-async fn main() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let queryable = session.declare_queryable("key/expression").await.unwrap();
-    while let Ok(query) = queryable.recv_async().await {
-        query.reply("key/expression", "value").await.unwrap();
-    }
-}
-```
-
-Request data:
-
-```rust
-use futures::prelude::*;
-#[tokio::main]
-async fn main() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let replies = session.get("key/expression").await.unwrap();
-    while let Ok(reply) = replies.recv_async().await {
-        println!(">> Received {:?}", reply.result());
-    }
-}
-```
-
-# Rust 1.75 support
-
-The crate `zenoh` can be compiled with Rust 1.75.0, but some of its dependencies may require higher Rust versions.
-To compile `zenoh` with Rust 1.75, add a dependency on the crate [zenoh-pinned-deps-1-75](http://crates.io/crates/zenoh-pinned-deps-1-75) to your `Cargo.toml`:
+After verified registry publication, the selected dependency spelling is:
 
 ```toml
-zenoh = "1.5.1"
-zenoh-pinned-deps-1-75 = "1.5.1"
+zenoh = { package = "bombay-zenoh", version = "=1.10.1", default-features = false, features = ["transport_tls"] }
 ```
 
-# Documentation and examples
-
-For more information, see its documentation: <https://docs.rs/zenoh>
-and some examples of usage in <https://github.com/eclipse-zenoh/zenoh/tree/main/examples>
+Local package verification is a release rehearsal; it does not establish
+registry availability. The original upstream project's website and API
+references describe its wider profile: [Eclipse Zenoh](https://zenoh.io/) and
+[upstream source at the selected revision](https://github.com/eclipse-zenoh/zenoh/tree/1211779c3647f5a96713dade452c546a07823580).
+The controlled source and package-release history belong to
+[devrandom-labs/bombay-zenoh](https://github.com/devrandom-labs/bombay-zenoh).

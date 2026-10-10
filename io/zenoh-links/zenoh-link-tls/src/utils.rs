@@ -156,6 +156,11 @@ impl ConfigurationInspector<ZenohConfig> for TlsConfigurator {
             false => ps.push((TLS_CLOSE_LINK_ON_EXPIRATION, "false")),
         }
 
+        match c.use_public_pki().unwrap_or(TLS_USE_PUBLIC_PKI_DEFAULT) {
+            true => ps.push((TLS_USE_PUBLIC_PKI, "true")),
+            false => ps.push((TLS_USE_PUBLIC_PKI, "false")),
+        }
+
         let rx_buffer_size;
         if let Some(size) = c.so_rcvbuf() {
             rx_buffer_size = size.to_string();
@@ -346,16 +351,7 @@ impl<'a> TlsClientConfig<'a> {
             None => TLS_CLOSE_LINK_ON_EXPIRATION_DEFAULT,
         };
 
-        // Allows mixed user-generated CA and webPKI CA
-        tracing::debug!("Loading default Web PKI certificates.");
-        let mut root_cert_store = RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-        };
-
-        if let Some(custom_root_cert) = load_trust_anchors(config)? {
-            tracing::debug!("Loading user-generated certificates.");
-            root_cert_store.extend(custom_root_cert.roots);
-        }
+        let root_cert_store = outgoing_trust_anchors(config)?;
 
         // Install ring based rustls CryptoProvider.
         rustls::crypto::ring::default_provider()
@@ -554,6 +550,33 @@ async fn load_tls_certificate(
     Err(zerror!("Missing tls certificates.").into())
 }
 
+fn outgoing_trust_anchors(config: &Config<'_>) -> ZResult<RootCertStore> {
+    let tls_use_public_pki: bool = match config.get(TLS_USE_PUBLIC_PKI) {
+        Some(s) => s
+            .parse()
+            .map_err(|_| zerror!("Unknown use public pki argument: {}", s))?,
+        None => TLS_USE_PUBLIC_PKI_DEFAULT,
+    };
+
+    let mut root_cert_store = RootCertStore::empty();
+    // Allows mixed user-generated CA and webPKI CA
+    if tls_use_public_pki {
+        tracing::debug!("Loading default Web PKI certificates.");
+        root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    }
+
+    if let Some(custom_root_cert) = load_trust_anchors(config)? {
+        tracing::debug!("Loading user-generated certificates.");
+        root_cert_store.extend(custom_root_cert.roots);
+    }
+
+    if root_cert_store.is_empty() {
+        return Err(zerror!("No root CA certificates loaded: 'use_public_pki' is disabled and no root CA certificate was configured").into());
+    }
+
+    Ok(root_cert_store)
+}
+
 fn load_trust_anchors(config: &Config<'_>) -> ZResult<Option<RootCertStore>> {
     let mut root_cert_store = RootCertStore::empty();
     if let Some(value) = config.get(TLS_ROOT_CA_CERTIFICATE_RAW) {
@@ -604,4 +627,144 @@ pub fn get_tls_host<'a>(address: &'a Address<'a>) -> ZResult<&'a str> {
 
 pub fn get_tls_server_name<'a>(address: &'a Address<'a>) -> ZResult<ServerName<'a>> {
     Ok(ServerName::try_from(get_tls_host(address)?).map_err(|e| zerror!(e))?)
+}
+
+#[cfg(test)]
+mod outgoing_tls_trust_tests {
+    use std::io::Cursor;
+
+    use zenoh_config::Config as ZenohConfig;
+    use zenoh_link_commons::ConfigurationInspector;
+    use zenoh_protocol::core::EndPoint;
+
+    use super::{outgoing_trust_anchors, process_pem, TlsClientConfig, TlsConfigurator};
+
+    const EMPTY_OUTGOING_TRUST: &str = "No root CA certificates loaded: 'use_public_pki' is disabled and no root CA certificate was configured";
+    // Existing public minica CA fixture from the owning transport tests.
+    // Embedded so these tests remain inside the published TLS package.
+    const DEPLOYMENT_CA: &str = "-----BEGIN CERTIFICATE-----
+MIIDSzCCAjOgAwIBAgIIB42n1ZIkOakwDQYJKoZIhvcNAQELBQAwIDEeMBwGA1UE
+AxMVbWluaWNhIHJvb3QgY2EgMDc4ZGE3MCAXDTIzMDMwNjE2MDMwN1oYDzIxMjMw
+MzA2MTYwMzA3WjAgMR4wHAYDVQQDExVtaW5pY2Egcm9vdCBjYSAwNzhkYTcwggEi
+MA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDIuCq24O4P4Aep5vAVlrIQ7P8+
+uWWgcHIFYa02TmhBUB/hjo0JANCQvAtpVNuQ8NyKPlqnnq1cttePbSYVeA0rrnOs
+DcfySAiyGBEY9zMjFfHJtH1wtrPcJEU8XIEY3xUlrAJE2CEuV9dVYgfEEydnvgLc
+8Ug0WXSiARjqbnMW3l8jh6bYCp/UpL/gSM4mxdKrgpfyPoweGhlOWXc3RTS7cqM9
+T25acURGOSI6/g8GF0sNE4VZmUvHggSTmsbLeXMJzxDWO+xVehRmbQx3IkG7u++b
+QdRwGIJcDNn7zHlDMHtQ0Z1DBV94fZNBwCULhCBB5g20XTGw//S7Fj2FPwyhAgMB
+AAGjgYYwgYMwDgYDVR0PAQH/BAQDAgKEMB0GA1UdJQQWMBQGCCsGAQUFBwMBBggr
+BgEFBQcDAjASBgNVHRMBAf8ECDAGAQH/AgEAMB0GA1UdDgQWBBTWfAmQ/BUIQm/9
+/llJJs2jUMWzGzAfBgNVHSMEGDAWgBTWfAmQ/BUIQm/9/llJJs2jUMWzGzANBgkq
+hkiG9w0BAQsFAAOCAQEAvtcZFAELKiTuOiAeYts6zeKxc+nnHCzayDeD/BDCbxGJ
+e1n+xdHjLtWGd+/Anc+fvftSYBPTFQqCi84lPiUIln5z/rUxE+ke81hNPIfw2obc
+yIg87xCabQpVyEh8s+MV+7YPQ1+fH4FuSi2Fck1FejxkVqN2uOZPvOYUmSTsaVr1
+8SfRnwJNZ9UMRPM2bD4Jkvj0VcL42JM3QkOClOzYW4j/vll2cSs4kx7er27cIoo1
+Ck0v2xSPAiVjg6w65rUQeW6uB5m0T2wyj+wm0At8vzhZPlgS1fKhcmT2dzOq3+oN
+R+IdLiXcyIkg0m9N8I17p0ljCSkbrgGMD3bbePRTfg==
+-----END CERTIFICATE-----";
+
+    #[tokio::test]
+    async fn configured_only_outgoing_tls_requires_a_trust_anchor() {
+        for (selection, expected_certificate) in [
+            ("use_public_pki=false", None),
+            ("use_public_pki=false;root_ca_certificate_raw=", Some("")),
+        ] {
+            let endpoint = EndPoint::new("tls", "localhost:7447", "", selection).unwrap();
+            let configuration = endpoint.config();
+            assert_eq!(
+                configuration.get("root_ca_certificate_raw"),
+                expected_certificate
+            );
+            let construction = TlsClientConfig::new(&configuration).await;
+            let refusal = match construction {
+                Err(refusal) => refusal,
+                Ok(_) => panic!("configured-only outgoing TLS silently loaded public roots"),
+            };
+            assert!(refusal.to_string().contains(EMPTY_OUTGOING_TRUST));
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_outgoing_tls_can_use_public_roots_without_a_private_ca() {
+        for selection in ["", "use_public_pki=true"] {
+            let endpoint = EndPoint::new("tls", "localhost:7447", "", selection).unwrap();
+            let configuration = endpoint.config();
+            let construction = TlsClientConfig::new(&configuration).await;
+            assert!(construction.is_ok());
+            let roots = outgoing_trust_anchors(&configuration).unwrap();
+            assert!(roots.roots == webpki_roots::TLS_SERVER_ROOTS);
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_only_outgoing_tls_preserves_exact_deployment_anchors() {
+        let selection = format!("use_public_pki=false;root_ca_certificate_raw={DEPLOYMENT_CA}");
+        let endpoint = EndPoint::new("tls", "localhost:7447", "", selection).unwrap();
+        let configuration = endpoint.config();
+        let expected = process_pem(&mut Cursor::new(DEPLOYMENT_CA)).unwrap();
+        assert_eq!(expected.len(), 1);
+        let roots = outgoing_trust_anchors(&configuration).unwrap();
+        assert!(
+            roots.roots == expected,
+            "configured-only outgoing roots included another anchor"
+        );
+        let construction = TlsClientConfig::new(&configuration).await;
+        assert!(construction.is_ok());
+    }
+
+    #[test]
+    fn legacy_outgoing_tls_preserves_public_and_deployment_anchors() {
+        let deployment = process_pem(&mut Cursor::new(DEPLOYMENT_CA)).unwrap();
+        let mut expected = webpki_roots::TLS_SERVER_ROOTS.to_vec();
+        expected.extend(deployment);
+        for selection in [
+            format!("root_ca_certificate_raw={DEPLOYMENT_CA}"),
+            format!("use_public_pki=true;root_ca_certificate_raw={DEPLOYMENT_CA}"),
+        ] {
+            let endpoint = EndPoint::new("tls", "localhost:7447", "", selection).unwrap();
+            let configuration = endpoint.config();
+            let roots = outgoing_trust_anchors(&configuration).unwrap();
+            assert!(roots.roots == expected);
+        }
+    }
+
+    #[test]
+    fn malformed_public_trust_selection_is_refused() {
+        let endpoint =
+            EndPoint::new("tls", "localhost:7447", "", "use_public_pki=malformed").unwrap();
+        let configuration = endpoint.config();
+        let refusal = outgoing_trust_anchors(&configuration).unwrap_err();
+        assert!(refusal
+            .to_string()
+            .starts_with("Unknown use public pki argument: malformed at "));
+    }
+
+    #[test]
+    fn malformed_configured_anchor_never_falls_back_to_public_roots() {
+        for selection in ["false", "true"] {
+            let certificate = "-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----";
+            let selection =
+                format!("use_public_pki={selection};root_ca_certificate_raw={certificate}");
+            let endpoint = EndPoint::new("tls", "localhost:7447", "", selection).unwrap();
+            let configuration = endpoint.config();
+            let refusal = outgoing_trust_anchors(&configuration).unwrap_err();
+            assert!(refusal
+                .to_string()
+                .starts_with("Error processing trust anchor:"));
+        }
+    }
+
+    #[test]
+    fn deployment_only_selection_reaches_outgoing_endpoint() {
+        let mut session = ZenohConfig::default();
+        session
+            .insert_json5("transport/link/tls/use_public_pki", "false")
+            .unwrap();
+        let selection = TlsConfigurator.inspect_config(&session).unwrap();
+        let endpoint = EndPoint::new("tls", "localhost:7447", "", selection).unwrap();
+        let configuration = endpoint.config();
+        assert_eq!(configuration.get("use_public_pki"), Some("false"));
+        let refusal = outgoing_trust_anchors(&configuration).unwrap_err();
+        assert!(refusal.to_string().contains(EMPTY_OUTGOING_TRUST));
+    }
 }
