@@ -11,12 +11,16 @@ Any further partial refusal stops the operation and preserves registry receipts;
 this is neither an atomic cohort release nor an automatic retry. Registry-only
 consumer verification passed after all nine publication receipts were established.
 
-The next reviewed release candidate is only `bombay-zenoh 1.10.2`, correcting
-leading UTF-8 resource chunks. Its eight published dependency versions and
-archive checksums remain unchanged. Current verify/publish operations audit one
-new owning archive and those exact published dependencies; historical resume
-keeps its original source and transaction. Registry publication and a clean
-registry-only consumer remain required before claiming this successor delivered.
+Published `bombay-zenoh 1.10.2` corrects leading UTF-8 resource chunks; its actual
+registry archives and registry-only consumer were verified. The next candidate,
+`1.10.3`, also retires finalized/disconnected native interest resources after
+their last owner releases them. Owning tests cover shared resources, repeated
+finalization and disconnect; this is not a global memory quota or unwind rollback.
+Its eight published dependency versions and archive checksums remain unchanged.
+Current verify/publish operations audit one new owning archive and those exact
+published dependencies; historical resume keeps its original source/transaction.
+Required review/CI, registry publication and a clean registry-only consumer must
+pass before claiming `1.10.3` delivered.
 
 This local source is based on upstream revision
 `1211779c3647f5a96713dade452c546a07823580` (1.10.1). The controlled package

@@ -42,6 +42,11 @@ for profile in debug release; do
   cargo test --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib \
     --no-default-features --features transport_tls \
     net::tests::tables::leading_utf8_chunks_preserve_registered_resources -- --exact
+  cargo test --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib \
+    --no-default-features --features transport_tls,test \
+    net::tests::regions::interest -- --test-threads=1
+  cargo clippy --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib --tests \
+    --no-default-features --features transport_tls,test -- -D warnings
   cargo clippy --locked --jobs 2 "${build_arguments[@]}" \
     -p bombay-zenoh --lib --tests --no-default-features --features transport_tls -- -D warnings
   cargo clippy --locked --jobs 2 "${build_arguments[@]}" \

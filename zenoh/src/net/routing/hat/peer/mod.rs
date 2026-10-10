@@ -343,10 +343,14 @@ impl HatBaseTrait for Hat {
             }
         };
 
-        hat_face.remote_interests.clear();
         hat_face.local_subs.clear();
         hat_face.local_qabls.clear();
         hat_face.local_tokens.clear();
+        for (_, retired_interest) in hat_face.remote_interests.drain() {
+            if let Some(mut resource) = retired_interest.res {
+                Resource::clean(&mut resource);
+            }
+        }
 
         if let Some(net) = self.net_mut() {
             net.remove_link(&face.zid);

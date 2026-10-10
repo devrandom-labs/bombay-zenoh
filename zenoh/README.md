@@ -25,7 +25,7 @@ and identity policies belong to the Bombay integration.
 After verified registry publication, the selected dependency spelling is:
 
 ```toml
-zenoh = { package = "bombay-zenoh", version = "=1.10.2", default-features = false, features = ["transport_tls"] }
+zenoh = { package = "bombay-zenoh", version = "=1.10.3", default-features = false, features = ["transport_tls"] }
 ```
 
 Local package verification is a release rehearsal; it does not establish
@@ -35,7 +35,10 @@ references describe its wider profile: [Eclipse Zenoh](https://zenoh.io/) and
 The controlled source and package-release history belong to
 [devrandom-labs/bombay-zenoh](https://github.com/devrandom-labs/bombay-zenoh).
 
-The proposed `1.10.2` successor also corrects resource registration for valid
-leading UTF-8 path chunks. Its eight controlled dependencies retain their
-published versions. Use this version only after its registry publication is
-verified; source preparation and packaging checks alone do not establish it.
+Published `1.10.2` corrects resource registration for valid leading UTF-8 path
+chunks. The proposed `1.10.3` successor additionally retires finalized/disconnected
+native interest resources after their last owner releases them; live shared
+owners retain those resources. Its eight controlled dependencies stay published
+at their existing versions. Use `1.10.3` only after required review/CI and registry
+publication/consumption are verified; source preparation alone does not establish
+availability, global memory quotas or rollback after routing unwinds.

@@ -357,19 +357,25 @@ impl Face {
             send_declare: &mut |_, _| unreachable!(),
         };
 
-        // Unregister keyexpr interest
-        get_mut_unchecked(ctx.src_face)
+        // Retain both retired stores' resource references until their cleanup cuts.
+        let retired_key_resource = get_mut_unchecked(ctx.src_face)
             .remote_key_interests
-            .remove(&msg.id);
+            .remove(&msg.id)
+            .flatten();
 
         let hats = &mut tables.hats;
         let region = ctx.src_face.region;
 
-        let Some(remote_interest) = hats[region].unregister_interest(ctx.reborrow(), msg) else {
-            return;
-        };
-
-        hats[Region::North].route_interest_final(ctx, msg, &remote_interest);
+        if let Some(retired_interest) = hats[region].unregister_interest(ctx.reborrow(), msg) {
+            hats[Region::North].route_interest_final(ctx, msg, &retired_interest);
+            if let Some(mut resource) = retired_interest.res {
+                Resource::clean(&mut resource);
+            }
+        }
+        // The native temporary has dropped before cleaning any remaining key reference.
+        if let Some(mut resource) = retired_key_resource {
+            Resource::clean(&mut resource);
+        }
     }
 
     #[tracing::instrument(level = "debug", skip(self, wtables, _node_id, send_declare), ret)]
