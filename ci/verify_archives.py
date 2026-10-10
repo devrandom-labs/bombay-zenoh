@@ -8,7 +8,9 @@ import json
 import subprocess
 import tarfile
 import tomllib
+from io import BytesIO
 from pathlib import Path, PurePosixPath
+from tempfile import TemporaryDirectory
 from urllib.request import Request, urlopen
 
 CONTROLLED_REPOSITORY = "https://github.com/devrandom-labs/bombay-zenoh"
@@ -140,9 +142,13 @@ def verify_manifest(owner, manifest, release_kind=ReleaseKind.INITIAL_COHORT):
         require(features.get("default", []) == expected_default, f"{owner}: default profile")
 
 
-def read_archive(archive, prefix):
+def read_archive(archive, prefix, expected_checksum=None):
+    archive_bytes = archive.read_bytes()
+    if expected_checksum is not None:
+        require(hashlib.sha256(archive_bytes).hexdigest() == expected_checksum,
+                f"{prefix}: immutable archive checksum")
     contents = {}
-    with tarfile.open(archive, "r:gz") as packaged:
+    with tarfile.open(fileobj=BytesIO(archive_bytes), mode="r:gz") as packaged:
         for member in packaged.getmembers():
             path = PurePosixPath(member.name)
             require(path.parts[0] == prefix and ".." not in path.parts, "archive path escape")
@@ -155,9 +161,13 @@ def read_archive(archive, prefix):
     return contents
 
 
-def verify_archive(root, archives, owner, revision, release_kind=ReleaseKind.INITIAL_COHORT):
+def verify_archive(root, archives, owner, revision, release_kind=ReleaseKind.INITIAL_COHORT,
+                   expected_checksum=None):
     prefix = identity(owner) + "-" + version(owner, release_kind)
-    contents = read_archive(archives / (prefix + ".crate"), prefix)
+    archive = archives / (prefix + ".crate")
+    if release_kind is ReleaseKind.ZENOH_SUCCESSOR and owner != "zenoh":
+        expected_checksum = PUBLISHED_DEPENDENCIES[owner]
+    contents = read_archive(archive, prefix, expected_checksum)
     manifest = tomllib.loads(contents["Cargo.toml"].decode())
     verify_manifest(owner, manifest, release_kind)
     directory = root / (ZENOH_OWNERS[owner] if owner in ZENOH_OWNERS else
@@ -183,7 +193,7 @@ def verify_archive(root, archives, owner, revision, release_kind=ReleaseKind.INI
         if (directory / custody).exists():
             require(contents[custody] == (directory / custody).read_bytes(), f"{owner}: {custody}")
     print(f"verified {prefix}: {len(actual)} Rust files; archive sha256="
-          + hashlib.sha256((archives / (prefix + ".crate")).read_bytes()).hexdigest())
+          + (expected_checksum or hashlib.sha256(archive.read_bytes()).hexdigest()))
     return manifest
 
 
@@ -277,18 +287,37 @@ def main():
     if release_kind is ReleaseKind.ZENOH_SUCCESSOR:
         acquire_published_dependencies(archives)
     revision = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
-    manifests = {owner: verify_archive(
-        root, archives, owner,
-        PUBLISHED_REVISION if release_kind is ReleaseKind.ZENOH_SUCCESSOR and owner != "zenoh" else revision,
-        release_kind) for owner in EDGES}
     checksums = {identity(owner): hashlib.sha256(
         (archives / (identity(owner) + "-" + version(owner, release_kind) + ".crate")).read_bytes()).hexdigest()
         for owner in EDGES}
+    manifests = {owner: verify_archive(
+        root, archives, owner,
+        PUBLISHED_REVISION if release_kind is ReleaseKind.ZENOH_SUCCESSOR and owner != "zenoh" else revision,
+        release_kind, checksums[identity(owner)]) for owner in EDGES}
     locks = {owner: tomllib.loads(read_archive(
         archives / (identity(owner) + "-" + version(owner, release_kind) + ".crate"),
-        identity(owner) + "-" + version(owner, release_kind))["Cargo.lock"].decode()) for owner in EDGES}
+        identity(owner) + "-" + version(owner, release_kind), checksums[identity(owner)])["Cargo.lock"].decode()) for owner in EDGES}
     edge_count = sum(len(verify_lock(owner, lock, checksums, release_kind)) for owner, lock in locks.items())
     require(edge_count == 29, "controlled archived checksum edge inventory changed")
+    if release_kind is ReleaseKind.ZENOH_SUCCESSOR:
+        # Changing gzip metadata preserves source members but violates published byte custody.
+        with TemporaryDirectory(prefix="bombay-published-archive-") as temporary:
+            owner = "zenoh-config"
+            archive_name = identity(owner) + "-" + version(owner) + ".crate"
+            original = (archives / archive_name).read_bytes()
+            changed = bytearray(original)
+            changed[4] ^= 1
+            mutant_archives = Path(temporary)
+            (mutant_archives / archive_name).write_bytes(changed)
+            try:
+                verify_archive(root, mutant_archives, owner, PUBLISHED_REVISION, release_kind)
+            except ValueError as refused:
+                require("immutable archive checksum" in str(refused),
+                        f"wrong published archive inversion diagnostic: {refused}")
+                print(f"intended published archive inversion refused: {refused}")
+            else:
+                raise ValueError("changed immutable published archive unexpectedly accepted")
+            verify_archive(root, archives, owner, PUBLISHED_REVISION, release_kind)
     for defect in ("checksum", "identity", "closure", "reference"):
         mutant = copy.deepcopy(locks["zenoh-config"])
         dependency = next(package for package in mutant["package"]
@@ -333,7 +362,7 @@ def main():
             raise ValueError(f"{defect} inversion unexpectedly accepted")
         verify_archive(root, archives, owner,
                        PUBLISHED_REVISION if release_kind is ReleaseKind.ZENOH_SUCCESSOR and owner != "zenoh" else revision,
-                       release_kind)
+                       release_kind, checksums[identity(owner)])
     if arguments.ledger is not None:
         cohort = {identity(owner): {"version": version(owner, release_kind), "checksum": checksums[identity(owner)]}
                   for owner in EDGES if release_kind is ReleaseKind.INITIAL_COHORT or owner == "zenoh"}
