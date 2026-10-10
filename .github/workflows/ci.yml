@@ -10,6 +10,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_INCREMENTAL: "0"
+
 concurrency:
   group: controlled-dependencies-${{ github.ref }}
   cancel-in-progress: true

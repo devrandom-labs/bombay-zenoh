@@ -18,6 +18,9 @@ permissions:
   contents: read
   checks: read
 
+env:
+  CARGO_INCREMENTAL: "0"
+
 concurrency:
   group: controlled-dependency-release
   cancel-in-progress: false
