@@ -2718,7 +2718,14 @@ impl Session {
             ConsolidationMode::Auto => ConsolidationMode::Latest,
             mode => mode,
         };
-        let qid = state.qid_counter.fetch_add(1, Ordering::SeqCst);
+        // Keep the standard spelling available at the declared Rust 1.75 minimum.
+        #[allow(deprecated)]
+        let qid = state
+            .qid_counter
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |next_id| {
+                next_id.checked_add(1)
+            })
+            .map_err(|_| zerror!("Query identifier space exhausted"))?;
         let primitives = state.primitives()?;
         self.register_query_cancellation(
             #[cfg(feature = "unstable")]
@@ -3759,5 +3766,136 @@ impl Closeable for Session {
 
     fn get_closee(&self) -> Self::TClosee {
         self.downgrade()
+    }
+}
+
+#[cfg(test)]
+mod query_identifiers {
+    use std::{
+        mem,
+        sync::{atomic::Ordering, Arc, Mutex},
+        time::Duration,
+    };
+
+    use zenoh_core::zwrite;
+    use zenoh_protocol::network::RequestId;
+
+    use crate::{
+        handlers::CallbackDrop,
+        query::{ConsolidationMode, Query, Reply},
+        sample::Locality,
+        Config,
+    };
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn accepted_queries_keep_their_reply_consumer_at_identifier_exhaustion() {
+        let mut config = Config::default();
+        config.scouting.multicast.set_enabled(Some(false)).unwrap();
+        config.scouting.gossip.set_enabled(Some(false)).unwrap();
+        config.listen.endpoints.set(Vec::new()).unwrap();
+        config.connect.endpoints.set(Vec::new()).unwrap();
+        let session = crate::open(config).await.unwrap();
+        let key_expr = "query/identifier/retained";
+        let queries = Arc::new(Mutex::new(Vec::<Query>::new()));
+        let received_queries = queries.clone();
+        let queryable = session
+            .declare_queryable(key_expr)
+            .allowed_origin(Locality::SessionLocal)
+            .callback(move |query| received_queries.lock().unwrap().push(query))
+            .await
+            .unwrap();
+        let replies = Arc::new(Mutex::new(Vec::<(u8, Reply)>::new()));
+        let completions = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut request_receipts = Vec::new();
+        for marker in *b"ABCDE" {
+            if marker == b'B' {
+                // Accelerate the actual private allocator to its last usable ID.
+                // A's real native Query and callback remain live throughout.
+                let state = zwrite!(session.0.state);
+                state
+                    .qid_counter
+                    .store(RequestId::MAX - 1, Ordering::SeqCst);
+                drop(state);
+            }
+            let received_replies = replies.clone();
+            let completed_queries = completions.clone();
+            let issued = session
+                .get(key_expr)
+                .allowed_destination(Locality::SessionLocal)
+                .consolidation(ConsolidationMode::None)
+                .timeout(Duration::from_secs(60))
+                .payload(vec![marker])
+                .with(CallbackDrop {
+                    callback: move |reply: Reply| {
+                        received_replies.lock().unwrap().push((marker, reply));
+                    },
+                    drop: move || completed_queries.lock().unwrap().push(marker),
+                })
+                .await;
+            request_receipts.push((marker, issued));
+        }
+        let (next_identifier, pending_queries) = {
+            let state = zwrite!(session.0.state);
+            (
+                state.qid_counter.load(Ordering::SeqCst),
+                state.queries.len(),
+            )
+        };
+        let native_queries = {
+            let mut queued = queries.lock().unwrap();
+            mem::take(&mut *queued)
+        };
+        let native_identifiers: Vec<_> =
+            native_queries.iter().map(|query| query.inner.qid).collect();
+        let mut reply_receipts = Vec::new();
+        for query in &native_queries {
+            let request_payload = query.payload().map(|payload| payload.to_bytes());
+            let replied = match request_payload {
+                Some(request_bytes) => Some(query.reply(key_expr, request_bytes.to_vec()).await),
+                None => None,
+            };
+            reply_receipts.push(replied);
+        }
+        // The native queries issue their actual finals when their last owners
+        // are discharged. Session close also acquires the retained timer tasks.
+        drop(native_queries);
+        let queryable_retirement = queryable.undeclare().await;
+        let session_close = session.close().await;
+
+        let expected_replies: Vec<_> = request_receipts
+            .iter()
+            .filter(|(_, receipt)| receipt.is_ok())
+            .map(|(marker, _)| (*marker, vec![*marker]))
+            .collect();
+        let reply_originals = replies.lock().unwrap();
+        let actual_replies: Vec<_> = reply_originals
+            .iter()
+            .map(|(consumer, reply)| {
+                (
+                    *consumer,
+                    reply.result().unwrap().payload().to_bytes().to_vec(),
+                )
+            })
+            .collect();
+        let mut completion_receipts = completions.lock().unwrap();
+        completion_receipts.sort_unstable();
+        assert!(queryable_retirement.is_ok());
+        assert!(session_close.is_ok());
+        assert!(request_receipts[0].1.is_ok());
+        assert!(reply_receipts
+            .iter()
+            .all(|receipt| matches!(receipt, Some(Ok(())))));
+        assert_eq!(
+            actual_replies, expected_replies,
+            "accepted query reply consumers must remain distinct"
+        );
+        assert_eq!(completion_receipts.as_slice(), b"ABCDE");
+        assert!(request_receipts[1].1.is_ok());
+        assert!(request_receipts[2..]
+            .iter()
+            .all(|(_, receipt)| receipt.is_err()));
+        assert_eq!(native_identifiers, vec![0, RequestId::MAX - 1]);
+        assert_eq!(pending_queries, 2);
+        assert_eq!(next_identifier, RequestId::MAX);
     }
 }
