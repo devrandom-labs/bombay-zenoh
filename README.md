@@ -11,16 +11,26 @@ Any further partial refusal stops the operation and preserves registry receipts;
 this is neither an atomic cohort release nor an automatic retry. Registry-only
 consumer verification passed after all nine publication receipts were established.
 
-Published `bombay-zenoh 1.10.2` corrects leading UTF-8 resource chunks; its actual
-registry archives and registry-only consumer were verified. The next candidate,
-`1.10.3`, also retires finalized/disconnected native interest resources after
-their last owner releases them. Owning tests cover shared resources, repeated
-finalization and disconnect; this is not a global memory quota or unwind rollback.
-Its eight published dependency versions and archive checksums remain unchanged.
+Published `bombay-zenoh 1.10.2` corrects leading UTF-8 resource chunks.
+Published `1.10.3` also retires finalized/disconnected native interest resources
+after their last owner releases them. Their actual registry archives and clean
+registry-only consumers were verified. These corrections do not establish a
+global memory quota or unwind rollback.
+
+The next candidate, `1.10.4`, refuses query-identifier exhaustion in the existing
+Session before registering, retaining or dispatching a new query. IDs never wrap
+or become reusable in that Session; the maximum counter value denotes exhaustion.
+The last usable ID remains available. Owning tests retain real native queries,
+replies and error results through actual undeclaration and session close, and
+prove repeated exhaustion cannot replace another query's consumer. The existing
+get error does not return its original payload. Router allocation and native
+timeout-task/resource bounds remain separate open requirements.
+
+The eight published dependency versions and archive checksums remain unchanged.
 Current verify/publish operations audit one new owning archive and those exact
 published dependencies; historical resume keeps its original source/transaction.
 Required review/CI, registry publication and a clean registry-only consumer must
-pass before claiming `1.10.3` delivered.
+pass before claiming `1.10.4` delivered.
 
 This local source is based on upstream revision
 `1211779c3647f5a96713dade452c546a07823580` (1.10.1). The controlled package

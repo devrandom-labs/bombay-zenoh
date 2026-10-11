@@ -185,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "bombay-zenoh"
-version = "1.10.3"
+version = "1.10.4"
 dependencies = [
  "ahash",
  "arc-swap",

@@ -85,7 +85,7 @@ def identity(owner):
 
 def version(owner, release_kind=ReleaseKind.INITIAL_COHORT):
     if owner == "zenoh" and release_kind is ReleaseKind.ZENOH_SUCCESSOR:
-        return "1.10.3"
+        return "1.10.4"
     return "1.10.1" if owner in ZENOH_OWNERS else "2.2.0"
 
 
