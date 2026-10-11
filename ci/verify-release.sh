@@ -69,4 +69,6 @@ done
 
 # Verify only the successor against unchanged actual published dependencies.
 cargo package -p bombay-zenoh --no-default-features --features transport_tls --locked --jobs 2
-python3 ci/verify_archives.py "$PWD" "$PWD/target/package" --release-kind zenoh-successor
+python3 ci/verify_archives.py "$PWD" "$PWD/target/package" "$PWD/target/package/audited-cohort.json" --release-kind zenoh-successor
+PYTHONDONTWRITEBYTECODE=1 python3 ci/verify_packaged_queries_tests.py
+PYTHONDONTWRITEBYTECODE=1 python3 ci/verify_packaged_queries.py

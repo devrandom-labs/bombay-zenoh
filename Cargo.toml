@@ -232,7 +232,7 @@ windows-sys = { version = "0.61.2", features = [
 ] }
 x509-parser = "0.18.0"
 z-serial = "0.3.1"
-zenoh = { package = "bombay-zenoh", version = "=1.10.4", path = "zenoh", default-features = false }
+zenoh = { package = "bombay-zenoh", version = "=1.10.5", path = "zenoh", default-features = false }
 zenoh-buffers = { version = "=1.10.1", path = "commons/zenoh-buffers", default-features = false }
 zenoh-codec = { version = "=1.10.1", path = "commons/zenoh-codec" }
 zenoh-collections = { version = "=1.10.1", path = "commons/zenoh-collections", default-features = false }
