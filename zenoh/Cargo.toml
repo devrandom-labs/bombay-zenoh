@@ -23,7 +23,7 @@ name = "bombay-zenoh"
 readme = "README.md"
 repository = { workspace = true }
 rust-version = { workspace = true }
-version = "1.10.5"
+version = "1.10.6"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [badges]

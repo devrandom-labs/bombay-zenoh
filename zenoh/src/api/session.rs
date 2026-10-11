@@ -2747,6 +2747,7 @@ impl Session {
             _ => 1,
         };
         let token = self.0.task_controller.get_cancellation_token();
+        let timeout_cancellation = token.clone().drop_guard();
         self.0
             .task_controller
             .spawn_with_rt(zenoh_runtime::ZRuntime::Net, {
@@ -2786,6 +2787,7 @@ impl Session {
                 replies: (consolidation != ConsolidationMode::None).then(HashMap::new),
                 callback,
                 querier_id,
+                _timeout_cancellation: timeout_cancellation,
             },
         );
         drop(state);
@@ -3897,5 +3899,231 @@ mod query_identifiers {
         assert_eq!(native_identifiers, vec![0, RequestId::MAX - 1]);
         assert_eq!(pending_queries, 2);
         assert_eq!(next_identifier, RequestId::MAX);
+    }
+}
+
+#[cfg(test)]
+mod query_retirement {
+    use std::{
+        mem,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+
+    use zenoh_config::Config;
+    use zenoh_core::zwrite;
+
+    use crate::{
+        handlers::CallbackDrop,
+        query::{ConsolidationMode, Query, Reply},
+        sample::Locality,
+    };
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn retired_queriers_release_timeouts_while_native_queries_are_retained() {
+        let mut config = Config::default();
+        config.scouting.multicast.set_enabled(Some(false)).unwrap();
+        config.scouting.gossip.set_enabled(Some(false)).unwrap();
+        config.listen.endpoints.set(Vec::new()).unwrap();
+        config.connect.endpoints.set(Vec::new()).unwrap();
+        let session = crate::open(config).await.unwrap();
+        let survivor = session
+            .declare_queryable("query/retirement/survivor")
+            .allowed_origin(Locality::SessionLocal)
+            .await
+            .unwrap();
+        let baseline_owners = Arc::strong_count(&session.0);
+        let key_expr = "query/retirement/querier";
+        let queries = Arc::new(Mutex::new(Vec::<Query>::new()));
+        let received_queries = queries.clone();
+        let queryable = session
+            .declare_queryable(key_expr)
+            .allowed_origin(Locality::SessionLocal)
+            .callback(move |query| received_queries.lock().unwrap().push(query))
+            .await
+            .unwrap();
+        let querier = session
+            .declare_querier(key_expr)
+            .allowed_destination(Locality::SessionLocal)
+            .consolidation(ConsolidationMode::None)
+            .timeout(Duration::from_secs(60))
+            .await
+            .unwrap();
+        let replies = Arc::new(Mutex::new(Vec::<Reply>::new()));
+        let received_replies = replies.clone();
+        let completions = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let completed_queries = completions.clone();
+        let request_receipt = querier
+            .get()
+            .payload(vec![b'A'])
+            .with(CallbackDrop {
+                callback: move |reply: Reply| received_replies.lock().unwrap().push(reply),
+                drop: move || completed_queries.lock().unwrap().push(b'A'),
+            })
+            .await;
+        let native_queries = mem::take(&mut *queries.lock().unwrap());
+        let retained_queries = native_queries.len();
+        let queryable_retirement = queryable.undeclare().await;
+        let withdrawn_queries = zwrite!(session.0.state).queries.len();
+        let withdrawn_completions = completions.lock().unwrap().len();
+        let querier_retirement = querier.undeclare().await;
+        let pending_queries = zwrite!(session.0.state).queries.len();
+        let native_payloads: Vec<_> = native_queries
+            .iter()
+            .map(|query| query.payload().map(|payload| payload.to_bytes().to_vec()))
+            .collect();
+        let mut late_reply_receipts = Vec::new();
+        for query in &native_queries {
+            let replied = query.reply(key_expr, vec![b'A']).await;
+            late_reply_receipts.push(replied);
+        }
+        // A late native send receipt does not prove delivery to a retired
+        // consumer, or nonexecution of any foreign operation.
+        drop(native_queries);
+        let owner_retirement = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let owners = Arc::strong_count(&session.0);
+                if owners == baseline_owners {
+                    return owners;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let waiting_owners = Arc::strong_count(&session.0);
+        let survivor_retirement = survivor.undeclare().await;
+        let session_close = session.close().await;
+        let reply_originals = replies.lock().unwrap();
+        let completion_receipts = completions.lock().unwrap();
+        eprintln!(
+            "retired querier owners: baseline={baseline_owners}, waiting={waiting_owners}, \
+             pending={pending_queries}, retirement={owner_retirement:?}, \
+             querier={querier_retirement:?}, undeclare={queryable_retirement:?}, \
+             survivor={survivor_retirement:?}, close={session_close:?}"
+        );
+        assert!(querier_retirement.is_ok());
+        assert!(queryable_retirement.is_ok());
+        assert!(survivor_retirement.is_ok());
+        assert!(session_close.is_ok());
+        assert!(request_receipt.is_ok());
+        assert_eq!(retained_queries, 1);
+        assert_eq!(withdrawn_queries, 1);
+        assert_eq!(withdrawn_completions, 0);
+        assert_eq!(native_payloads, vec![Some(vec![b'A'])]);
+        assert!(late_reply_receipts.iter().all(Result::is_ok));
+        assert!(reply_originals.is_empty());
+        assert_eq!(completion_receipts.as_slice(), b"A");
+        assert_eq!(pending_queries, 0);
+        assert!(
+            owner_retirement.is_ok(),
+            "retired querier timers must release their Session owners before the query deadline"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn completed_queries_release_their_timeout_session_owners() {
+        let mut config = Config::default();
+        config.scouting.multicast.set_enabled(Some(false)).unwrap();
+        config.scouting.gossip.set_enabled(Some(false)).unwrap();
+        config.listen.endpoints.set(Vec::new()).unwrap();
+        config.connect.endpoints.set(Vec::new()).unwrap();
+        let session = crate::open(config).await.unwrap();
+        let key_expr = "query/retirement/owners";
+        let queries = Arc::new(Mutex::new(Vec::<Query>::new()));
+        let received_queries = queries.clone();
+        let queryable = session
+            .declare_queryable(key_expr)
+            .allowed_origin(Locality::SessionLocal)
+            .callback(move |query| received_queries.lock().unwrap().push(query))
+            .await
+            .unwrap();
+        let baseline_owners = Arc::strong_count(&session.0);
+        let replies = Arc::new(Mutex::new(Vec::<(u8, Reply)>::new()));
+        let completions = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut request_receipts = Vec::new();
+        for marker in *b"AB" {
+            let received_replies = replies.clone();
+            let completed_queries = completions.clone();
+            let issued = session
+                .get(key_expr)
+                .allowed_destination(Locality::SessionLocal)
+                .consolidation(ConsolidationMode::None)
+                .timeout(Duration::from_secs(60))
+                .payload(vec![marker])
+                .with(CallbackDrop {
+                    callback: move |reply: Reply| {
+                        received_replies.lock().unwrap().push((marker, reply));
+                    },
+                    drop: move || completed_queries.lock().unwrap().push(marker),
+                })
+                .await;
+            request_receipts.push(issued);
+        }
+        let issued_owners = Arc::strong_count(&session.0);
+        let native_queries = {
+            let mut queued = queries.lock().unwrap();
+            mem::take(&mut *queued)
+        };
+        let mut reply_receipts = Vec::new();
+        for query in &native_queries {
+            let request_payload = query.payload().map(|payload| payload.to_bytes());
+            let replied = match request_payload {
+                Some(request_bytes) => Some(query.reply(key_expr, request_bytes.to_vec()).await),
+                None => None,
+            };
+            reply_receipts.push(replied);
+        }
+        // Discharging actual Query owners emits their finals. The pending map
+        // and callback completion alone cannot establish timer retirement.
+        drop(native_queries);
+        let pending_queries = zwrite!(session.0.state).queries.len();
+        let completed_owners = Arc::strong_count(&session.0);
+        let owner_retirement = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let owners = Arc::strong_count(&session.0);
+                if owners == baseline_owners {
+                    return owners;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let waiting_owners = Arc::strong_count(&session.0);
+        // Preserve the timeout's original Elapsed before close cancels and
+        // joins the real tasks. Every semantic oracle runs after cleanup.
+        let queryable_retirement = queryable.undeclare().await;
+        let session_close = session.close().await;
+
+        let reply_originals = replies.lock().unwrap();
+        let actual_replies: Vec<_> = reply_originals
+            .iter()
+            .map(|(consumer, reply)| {
+                (
+                    *consumer,
+                    reply.result().unwrap().payload().to_bytes().to_vec(),
+                )
+            })
+            .collect();
+        let mut completion_receipts = completions.lock().unwrap();
+        completion_receipts.sort_unstable();
+        eprintln!(
+            "native query owners: baseline={baseline_owners}, issued={issued_owners}, \
+             completed={completed_owners}, waiting={waiting_owners}, \
+             pending={pending_queries}, retirement={owner_retirement:?}, \
+             undeclare={queryable_retirement:?}, close={session_close:?}"
+        );
+        assert!(queryable_retirement.is_ok());
+        assert!(session_close.is_ok());
+        assert!(request_receipts.iter().all(Result::is_ok));
+        assert!(reply_receipts
+            .iter()
+            .all(|receipt| matches!(receipt, Some(Ok(())))));
+        assert_eq!(actual_replies, vec![(b'A', vec![b'A']), (b'B', vec![b'B'])]);
+        assert_eq!(completion_receipts.as_slice(), b"AB");
+        assert_eq!(pending_queries, 0);
+        assert!(
+            owner_retirement.is_ok(),
+            "completed query timers must release their Session owners before the query deadline"
+        );
     }
 }
