@@ -14,6 +14,8 @@
 
 //! Tests involving [`zenoh_protocol::network::interest`].
 
+use std::sync::{Arc, Weak};
+
 use zenoh_protocol::{
     core::{Bound, Region, WhatAmI},
     network::{
@@ -21,8 +23,222 @@ use zenoh_protocol::{
         interest::{InterestMode, InterestOptions},
     },
 };
+use zenoh_transport::TransportPeerEventHandler;
 
 use super::{try_init_tracing_subscriber, Connection, FaceDef, Harness, HarnessBuilder};
+use crate::net::{
+    primitives::Primitives,
+    routing::{dispatcher::resource::Resource, gateway::Gateway},
+};
+
+const INTEREST_NAMESPACE: &str = "interest-retirement";
+
+fn interest_namespace_inventory(gateway: &Gateway) -> (usize, usize) {
+    let tables = gateway.tables.tables.read().unwrap();
+    let mut resources = vec![tables.data._get_root().as_ref()];
+    let mut nodes = 0;
+    let mut expression_bytes = 0;
+    // Borrowing the native tree does not perturb strong-count reclamation.
+    while let Some(resource) = resources.pop() {
+        if resource
+            .expr()
+            .strip_prefix(INTEREST_NAMESPACE)
+            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+        {
+            nodes += 1;
+            expression_bytes += resource.expr().len();
+        }
+        resources.extend(resource.children.iter().map(|child| child.as_ref()));
+    }
+    (nodes, expression_bytes)
+}
+
+fn interest_resource(gateway: &Gateway, expression: &str) -> Weak<Resource> {
+    let tables = gateway.tables.tables.read().unwrap();
+    let resource = Resource::get_resource_ref(tables.data._get_root(), expression)
+        .expect("the actual interest established its resource");
+    Arc::downgrade(resource)
+}
+
+#[test]
+fn interest_final_releases_resources_across_identifier_reuse_and_replay() {
+    let gateway = HarnessBuilder::new()
+        .mode(WhatAmI::Client)
+        .subregions([Region::Local])
+        .start_runtime(false)
+        .build();
+    let face = gateway.new_session();
+    let baseline = interest_namespace_inventory(&gateway.gateway);
+    assert_eq!(baseline, (0, 0));
+    let mut originals = Vec::new();
+    for expression in ["interest-retirement/first", "interest-retirement/second"] {
+        face.interest(
+            42,
+            InterestMode::Future,
+            InterestOptions::KEYEXPRS,
+            expression,
+        );
+        let original = interest_resource(&gateway.gateway, expression);
+        assert_eq!(face.face.state.remote_key_interests.len(), 1);
+        assert!(original.strong_count() > 0);
+        originals.push(original);
+        face.interest_wildcard(42, InterestMode::Final, InterestOptions::KEYEXPRS);
+        assert_eq!(face.face.state.remote_key_interests.len(), 0);
+        // Replay the same finalization before reusing its now-retired identifier.
+        face.interest_wildcard(42, InterestMode::Final, InterestOptions::KEYEXPRS);
+    }
+    let finalized = interest_namespace_inventory(&gateway.gateway);
+    let routed_messages = face.recorder().with_messages(|messages| messages.len());
+    face.face.send_close();
+    drop(face);
+    assert_eq!(routed_messages, 0, "this gateway has no north-bound peer");
+    for original in originals {
+        let retained = original.upgrade();
+        assert!(
+            retained.is_none(),
+            "finalized interest retains its original resource"
+        );
+    }
+    assert_eq!(
+        finalized, baseline,
+        "finalized interest retains namespace nodes or name bytes"
+    );
+}
+
+#[test_case::test_matrix(
+    [WhatAmI::Client, WhatAmI::Peer],
+    [(InterestOptions::KEYEXPRS, 1), (InterestOptions::SUBSCRIBERS, 0)]
+)]
+fn interest_final_preserves_shared_resources_until_the_last_owner_finishes(
+    remote_mode: WhatAmI,
+    (options, key_interest_count): (InterestOptions, usize),
+) {
+    let region = Region::default_south(remote_mode);
+    let gateway = HarnessBuilder::new()
+        .mode(WhatAmI::Client)
+        .subregions([region])
+        .build();
+    let face_definition = FaceDef::default().mode(remote_mode).region(region);
+    let first = gateway.new_face(face_definition);
+    let second = gateway.new_face(face_definition);
+    let expression = "interest-retirement/shared";
+    first.interest(42, InterestMode::Future, options, expression);
+    second.interest(42, InterestMode::Future, options, expression);
+    let original = interest_resource(&gateway.gateway, expression);
+    let active = interest_namespace_inventory(&gateway.gateway);
+    assert_eq!(active, (2, INTEREST_NAMESPACE.len() + expression.len()));
+    first.interest_wildcard(42, InterestMode::Final, options);
+    let shared = interest_namespace_inventory(&gateway.gateway);
+    assert_eq!(
+        shared, active,
+        "the other face still owns this exact resource"
+    );
+    assert!(original.strong_count() > 0);
+    assert_eq!(first.face.state.remote_key_interests.len(), 0);
+    assert_eq!(
+        second.face.state.remote_key_interests.len(),
+        key_interest_count
+    );
+    second.interest_wildcard(42, InterestMode::Final, options);
+    let finalized = interest_namespace_inventory(&gateway.gateway);
+    first.face.send_close();
+    second.face.send_close();
+    drop(first);
+    drop(second);
+    let retained = original.upgrade();
+    assert!(
+        retained.is_none(),
+        "last finalized owner retains its original resource"
+    );
+    assert_eq!(
+        finalized,
+        (0, 0),
+        "last finalized owner retains namespace nodes or name bytes"
+    );
+}
+
+#[test_case::test_matrix(
+    [WhatAmI::Client, WhatAmI::Peer],
+    [(InterestOptions::KEYEXPRS, 1), (InterestOptions::SUBSCRIBERS, 0)]
+)]
+fn interest_disconnect_releases_resources_after_the_native_face_is_removed(
+    remote_mode: WhatAmI,
+    (options, key_interest_count): (InterestOptions, usize),
+) {
+    let region = Region::default_south(remote_mode);
+    let gateway = HarnessBuilder::new()
+        .mode(WhatAmI::Client)
+        .subregions([region])
+        .build();
+    let face = gateway.new_face(FaceDef::default().mode(remote_mode).region(region));
+    let face_id = face.face.state.id;
+    let expression = "interest-retirement/disconnected";
+    face.interest(42, InterestMode::Future, options, expression);
+    let original = interest_resource(&gateway.gateway, expression);
+    let active = interest_namespace_inventory(&gateway.gateway);
+    assert_eq!(active, (2, INTEREST_NAMESPACE.len() + expression.len()));
+    assert_eq!(
+        face.face.state.remote_key_interests.len(),
+        key_interest_count
+    );
+    face.demux
+        .as_ref()
+        .expect("the real native transport callback")
+        .closed();
+    let tables = gateway.gateway.tables.tables.read().unwrap();
+    assert!(!tables.data.faces.contains_key(&face_id));
+    drop(tables);
+    drop(face);
+    let disconnected = interest_namespace_inventory(&gateway.gateway);
+    let retained = original.upgrade();
+    assert!(
+        retained.is_none(),
+        "disconnected interest retains its original resource"
+    );
+    assert_eq!(
+        disconnected,
+        (0, 0),
+        "disconnected interest retains namespace nodes or name bytes"
+    );
+}
+
+#[test_case::test_matrix([WhatAmI::Client, WhatAmI::Peer])]
+fn wildcard_interest_final_releases_native_registrations_without_allocating_resources(
+    remote_mode: WhatAmI,
+) {
+    let region = Region::default_south(remote_mode);
+    let gateway = HarnessBuilder::new()
+        .mode(WhatAmI::Client)
+        .subregions([region])
+        .build();
+    let face = gateway.new_face(FaceDef::default().mode(remote_mode).region(region));
+    face.interest_wildcard(42, InterestMode::Future, InterestOptions::KEYEXPRS);
+    assert!(matches!(
+        face.face.state.remote_key_interests.get(&42),
+        Some(None)
+    ));
+    let tables = gateway.gateway.tables.tables.read().unwrap();
+    let interests = tables.hats[region].remote_interests(&tables.data);
+    assert_eq!(interests.len(), 1);
+    assert!(interests.iter().all(|interest| interest.res.is_none()));
+    drop(interests);
+    drop(tables);
+    face.interest_wildcard(42, InterestMode::Final, InterestOptions::KEYEXPRS);
+    face.interest_wildcard(42, InterestMode::Final, InterestOptions::KEYEXPRS);
+    assert_eq!(face.face.state.remote_key_interests.len(), 0);
+    let tables = gateway.gateway.tables.tables.read().unwrap();
+    let interests = tables.hats[region].remote_interests(&tables.data);
+    assert_eq!(interests.len(), 0);
+    drop(interests);
+    drop(tables);
+    let finalized = interest_namespace_inventory(&gateway.gateway);
+    face.demux
+        .as_ref()
+        .expect("the native remote face")
+        .closed();
+    drop(face);
+    assert_eq!(finalized, (0, 0));
+}
 
 /// Test that current tokens are re-propagated even if they've already been propagated in future
 /// mode.

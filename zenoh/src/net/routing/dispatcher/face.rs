@@ -822,6 +822,12 @@ impl Primitives for Face {
 
         hats[region].close_face(ctx);
 
+        // Hat ownership is retired before the last key-interest reference is released.
+        for (_, retired_resource) in get_mut_unchecked(&mut state).remote_key_interests.drain() {
+            if let Some(mut resource) = retired_resource {
+                Resource::clean(&mut resource);
+            }
+        }
         tables.data.faces.remove(&src_fid);
 
         drop(wtables);
