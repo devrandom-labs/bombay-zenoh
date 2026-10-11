@@ -3777,6 +3777,7 @@ mod query_identifiers {
         time::Duration,
     };
 
+    use zenoh_config::Config;
     use zenoh_core::zwrite;
     use zenoh_protocol::network::RequestId;
 
@@ -3784,7 +3785,6 @@ mod query_identifiers {
         handlers::CallbackDrop,
         query::{ConsolidationMode, Query, Reply},
         sample::Locality,
-        Config,
     };
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

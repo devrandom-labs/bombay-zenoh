@@ -17,7 +17,7 @@ after their last owner releases them. Their actual registry archives and clean
 registry-only consumers were verified. These corrections do not establish a
 global memory quota or unwind rollback.
 
-The next candidate, `1.10.4`, refuses query-identifier exhaustion in the existing
+Published `1.10.4` refuses query-identifier exhaustion in the existing
 Session before registering, retaining or dispatching a new query. IDs never wrap
 or become reusable in that Session; the maximum counter value denotes exhaustion.
 The last usable ID remains available. Owning tests retain real native queries,
@@ -30,7 +30,17 @@ The eight published dependency versions and archive checksums remain unchanged.
 Current verify/publish operations audit one new owning archive and those exact
 published dependencies; historical resume keeps its original source/transaction.
 Required review/CI, registry publication and a clean registry-only consumer must
-pass before claiming `1.10.4` delivered.
+pass before claiming a successor delivered.
+
+The next top-only candidate, `1.10.5`, corrects the owning query test to use its
+configuration owner directly. The original published1.10.4 test relied on an
+unstable wrapper interface enabled implicitly by workspace tests; its standalone
+TLS-only compilation failed. The production query-ID correction and verified
+1.10.4 registry-only consumer remain valid. Release CI now additionally verifies
+the actual packaged owning test outside the workspace with only default TLS,
+in both debug and optimized profiles. All eight support copies remain unchanged.
+Required review/CI, publication, actual registry archives and clean consumer
+verification remain gates for this candidate.
 
 This local source is based on upstream revision
 `1211779c3647f5a96713dade452c546a07823580` (1.10.1). The controlled package
