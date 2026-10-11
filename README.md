@@ -32,7 +32,7 @@ published dependencies; historical resume keeps its original source/transaction.
 Required review/CI, registry publication and a clean registry-only consumer must
 pass before claiming a successor delivered.
 
-The next top-only candidate, `1.10.5`, corrects the owning query test to use its
+The predecessor candidate, `1.10.5`, corrected the owning query test to use its
 configuration owner directly. The original published1.10.4 test relied on an
 unstable wrapper interface enabled implicitly by workspace tests; its standalone
 TLS-only compilation failed. The production query-ID correction and verified
@@ -203,3 +203,14 @@ See more details and a directory of available plugins in the [zenohd](zenohd) re
 
 In case of trouble, please first check [this page](https://zenoh.io/docs/getting-started/troubleshooting/) to see if the issue and its cause are already known.
 Otherwise, you can ask a question on the [Zenoh Discord server](https://discord.gg/vSDSpqnbkm), or [create an issue](https://github.com/eclipse-zenoh/zenoh/issues).
+
+
+The next top-only candidate, `1.10.6`, retires each query's existing timeout
+owner when its native QueryState is destroyed. It uses Tokio-util's existing
+cancellation guard; the Session TaskController retains actual join authority.
+Native controls cover completed queries and querier retirement while a Query
+remains held, with original replies, finals, undeclarations and Session.close
+acquired before assertions. Release CI executes these two owning tests and the
+identifier test from the audited normalized archive in both profiles with only
+default TLS features. This proves prompt retained-reference retirement in local
+native queries; router pressure, query quotas and blocked callbacks remain open.

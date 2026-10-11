@@ -15,6 +15,7 @@
 use std::{collections::HashMap, error::Error, fmt::Display};
 
 use serde::Deserialize;
+use tokio_util::sync::DropGuard;
 #[cfg(feature = "unstable")]
 use zenoh_config::wrappers::EntityGlobalId;
 use zenoh_keyexpr::OwnedKeyExpr;
@@ -244,6 +245,8 @@ pub(crate) struct QueryState {
     pub(crate) replies: Option<HashMap<OwnedKeyExpr, Reply>>,
     pub(crate) callback: Callback<Reply>,
     pub(crate) querier_id: Option<Id>,
+    // Retiring the query requests retirement of its tracked timeout task.
+    pub(crate) _timeout_cancellation: DropGuard,
 }
 /// The kinds of accepted query replies.
 ///

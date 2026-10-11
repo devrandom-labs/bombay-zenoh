@@ -8,7 +8,11 @@ import tomllib
 
 from verify_archives import read_archive
 
-QUERY_TEST = "api::session::query_identifiers::accepted_queries_keep_their_reply_consumer_at_identifier_exhaustion"
+QUERY_TESTS = (
+    "api::session::query_identifiers::accepted_queries_keep_their_reply_consumer_at_identifier_exhaustion",
+    "api::session::query_retirement::completed_queries_release_their_timeout_session_owners",
+    "api::session::query_retirement::retired_queriers_release_timeouts_while_native_queries_are_retained",
+)
 
 
 def verify_query_profile(metadata, manifest):
@@ -19,9 +23,9 @@ def verify_query_profile(metadata, manifest):
     assert all(package["source"] == "registry+https://github.com/rust-lang/crates.io-index" for package in metadata["packages"] if package["id"] != owner["id"]), "packaged dependencies must be actual crates.io packages"
 
 
-def verify_query_execution(output):
+def verify_query_execution(output, query_test):
     assert output.count("running 1 test") == 1, "one owning query test must execute"
-    assert f"test {QUERY_TEST} ... ok" in output, "the selected owning query test must pass"
+    assert f"test {query_test} ... ok" in output, "the selected owning query test must pass"
     assert "test result: ok. 1 passed; 0 failed; 0 ignored;" in output, "the owning query test cannot be skipped"
 
 
@@ -53,13 +57,14 @@ def main():
             arguments = ["cargo", "test", "--manifest-path", str(manifest), "--locked", "--jobs", "2", "--lib"]
             if profile == "release":
                 arguments.append("--release")
-            result = subprocess.run(arguments + [QUERY_TEST, "--", "--exact", "--nocapture"], env=environment, capture_output=True, text=True)
-            output = result.stdout + result.stderr
-            Path("target/package", "packaged-query-" + profile + ".log").write_text(output)
-            print(output, flush=True)
-            result.check_returncode()
-            verify_query_execution(output)
-            assert all((source / name).read_bytes() == payload for name, payload in custody.items()), "packaged manifest/lock custody changed"
+            for query_test in QUERY_TESTS:
+                result = subprocess.run(arguments + [query_test, "--", "--exact", "--nocapture"], env=environment, capture_output=True, text=True)
+                output = result.stdout + result.stderr
+                Path("target/package", "packaged-query-" + profile + "-" + query_test.rsplit("::", 1)[-1] + ".log").write_text(output)
+                print(output, flush=True)
+                result.check_returncode()
+                verify_query_execution(output, query_test)
+                assert all((source / name).read_bytes() == payload for name, payload in custody.items()), "packaged manifest/lock custody changed"
 
 
 if __name__ == "__main__":

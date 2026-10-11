@@ -43,6 +43,8 @@ for profile in debug release; do
     --no-default-features --features transport_tls \
     api::session::query_identifiers::accepted_queries_keep_their_reply_consumer_at_identifier_exhaustion -- --exact
   cargo test --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib \
+    --no-default-features --features transport_tls api::session::query_retirement:: -- --nocapture
+  cargo test --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib \
     --no-default-features --features transport_tls \
     net::tests::tables::leading_utf8_chunks_preserve_registered_resources -- --exact
   cargo test --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib \
