@@ -17,13 +17,19 @@ required_check=$(gh api "repos/$GITHUB_REPOSITORY/commits/$source_commit/check-r
   --jq '[.check_runs[] | select(.name == "Controlled TLS dependencies" and .app.id == 15368)] | sort_by(.started_at) | last | .conclusion')
 [[ "$required_check" == success ]] || { printf 'Exact source lacks required passing CI\n' >&2; exit 1; }
 
-release_packages=(bombay-zenoh)
+case "${RELEASE_KIND:?}" in
+  zenoh-successor) release_packages=(bombay-zenoh) ;;
+  configuration-successor)
+    release_packages=(bombay-zenoh-config bombay-zenoh-link-tls
+      bombay-zenoh-plugin-trait bombay-zenoh-link bombay-zenoh-transport bombay-zenoh) ;;
+  *) printf 'Unknown release kind\n' >&2; exit 1 ;;
+esac
 package_arguments=()
 for package in "${release_packages[@]}"; do package_arguments+=(-p "$package"); done
-# Cargo verifies the one successor against immutable published dependencies.
+# Cargo verifies the exact selected successor closure against immutable dependencies.
 cargo publish --dry-run "${package_arguments[@]}" --no-default-features --features transport_tls --locked --jobs 2
 cohort="$PWD/target/package/audited-cohort.json"
-python3 ci/verify_archives.py "$PWD" "$PWD/target/package/tmp-crate" "$cohort" --release-kind zenoh-successor
+python3 ci/verify_archives.py "$PWD" "$PWD/target/package/tmp-crate" "$cohort" --release-kind "$RELEASE_KIND"
 if [[ "$RELEASE_OPERATION" == verify ]]; then
   printf 'Verified exact source and publication candidates; publishing authority remains unproved.\n'
   exit 0

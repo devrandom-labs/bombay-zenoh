@@ -16,6 +16,7 @@ use std::{
     convert::TryInto,
     fmt, hint,
     mem::{self, ManuallyDrop},
+    num::NonZeroUsize,
     ops::Deref,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -27,6 +28,9 @@ use std::{
 use async_trait::async_trait;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
+use tokio::sync::Semaphore;
+#[cfg(test)]
+use tokio::task::JoinHandle;
 use tracing::{error, info, span::EnteredSpan, trace, warn};
 use uhlc::Timestamp;
 #[cfg(feature = "internal")]
@@ -699,6 +703,9 @@ pub(crate) struct SessionInner {
     task_controller: TaskController,
     face_id: OnceCell<usize>,
     pub(crate) callbacks_drop_sync_group: SyncGroup,
+    query_capacity: Option<Arc<Semaphore>>,
+    #[cfg(test)]
+    query_timeout_tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl fmt::Debug for SessionInner {
@@ -866,8 +873,16 @@ impl Session {
         runtime: GenericRuntime,
         aggregated_subscribers: Vec<OwnedKeyExpr>,
         aggregated_publishers: Vec<OwnedKeyExpr>,
-    ) -> impl Resolve<Session> {
+    ) -> impl Resolve<ZResult<Session>> {
         ResolveClosure::new(move || {
+            let configured_capacity = runtime
+                .get_config()
+                .get_typed::<Option<NonZeroUsize>>("queries_max_retained")?;
+            if !zenoh_config::Config::validate_queries_max_retained(&configured_capacity) {
+                bail!("queries_max_retained exceeds Semaphore::MAX_PERMITS");
+            }
+            let query_capacity =
+                configured_capacity.map(|limit| Arc::new(Semaphore::new(limit.get())));
             let publisher_qos = runtime
                 .get_config()
                 .get_typed::<PublisherQoSConfList>("qos/publication")
@@ -886,6 +901,9 @@ impl Session {
                 task_controller: TaskController::default(),
                 face_id: OnceCell::new(),
                 callbacks_drop_sync_group: SyncGroup::default(),
+                query_capacity,
+                #[cfg(test)]
+                query_timeout_tasks: Mutex::new(Vec::new()),
             }));
 
             // Register connectivity handler
@@ -900,7 +918,7 @@ impl Session {
 
             admin::init(session.downgrade());
 
-            session
+            Ok(session)
         })
     }
 
@@ -1454,6 +1472,10 @@ impl Session {
         #[cfg(feature = "unstable")] timestamp_callback: Option<GetTimestampCallback>,
     ) -> impl Resolve<ZResult<Session>> {
         ResolveFuture::new(async move {
+            if !zenoh_config::Config::validate_queries_max_retained(config.0.queries_max_retained())
+            {
+                bail!("queries_max_retained exceeds Semaphore::MAX_PERMITS");
+            }
             tracing::debug!("Config: {:?}", &config);
             let aggregated_subscribers = config.0.aggregation().subscribers().clone();
             let aggregated_publishers = config.0.aggregation().publishers().clone();
@@ -1474,7 +1496,7 @@ impl Session {
                 aggregated_subscribers,
                 aggregated_publishers,
             )
-            .await;
+            .await?;
             runtime.start().await?;
             Ok(session)
         })
@@ -2699,7 +2721,7 @@ impl Session {
         value: Option<(ZBytes, Encoding)>,
         attachment: Option<ZBytes>,
         #[cfg(feature = "unstable")] source: Option<SourceInfo>,
-        mut callback: Callback<Reply>,
+        callback: Callback<Reply>,
         #[cfg(feature = "unstable")] cancellation_token: Option<CancellationToken>,
         querier_id: Option<EntityId>,
         querier_notifier: Option<SyncGroupNotifier>,
@@ -2711,22 +2733,32 @@ impl Session {
             target,
             consolidation
         );
-        let mut state = zwrite!(self.0.state);
+        let state = zwrite!(self.0.state);
         let consolidation = match consolidation.mode {
             #[cfg(feature = "unstable")]
             ConsolidationMode::Auto if parameters.time_range().is_some() => ConsolidationMode::None,
             ConsolidationMode::Auto => ConsolidationMode::Latest,
             mode => mode,
         };
-        // Keep the standard spelling available at the declared Rust 1.75 minimum.
+        let primitives = state.primitives()?;
+        let retained_capacity = self
+            .0
+            .query_capacity
+            .as_ref()
+            .map(|capacity| capacity.clone().try_acquire_owned().map(Arc::new))
+            .transpose()?;
+        // On pre-registration failure or unwind, release the state lock before
+        // the original callback, and return capacity only after that callback.
+        let mut query_owners = (state, callback, retained_capacity);
+        // Keep the standard spelling available across both pinned compiler profiles.
         #[allow(deprecated)]
-        let qid = state
+        let qid = query_owners
+            .0
             .qid_counter
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |next_id| {
                 next_id.checked_add(1)
             })
             .map_err(|_| zerror!("Query identifier space exhausted"))?;
-        let primitives = state.primitives()?;
         self.register_query_cancellation(
             #[cfg(feature = "unstable")]
             cancellation_token,
@@ -2739,7 +2771,7 @@ impl Session {
                     Ok(())
                 }
             },
-            &mut callback,
+            &mut query_owners.1,
         )?;
 
         let nb_final = match destination {
@@ -2748,14 +2780,16 @@ impl Session {
         };
         let token = self.0.task_controller.get_cancellation_token();
         let timeout_cancellation = token.clone().drop_guard();
-        self.0
+        let timeout_task = self
+            .0
             .task_controller
             .spawn_with_rt(zenoh_runtime::ZRuntime::Net, {
-                let session = self.downgrade();
+                // Keep the complete native captures together; capacity retires last.
+                let timeout_owners = (self.downgrade(), token, query_owners.2.clone());
                 async move {
                     tokio::select! {
                         _ = tokio::time::sleep(timeout) => {
-                            let mut state = zwrite!(session.0.state);
+                            let mut state = zwrite!(timeout_owners.0.0.state);
                             if let Some(query) = state.queries.remove(&qid) {
                                 std::mem::drop(state);
                                 tracing::debug!("Timeout on query {}! Send error and close.", qid);
@@ -2771,13 +2805,22 @@ impl Session {
                                 });
                             }
                         }
-                        _ = token.cancelled() => {}
+                        _ = timeout_owners.1.cancelled() => {}
                     }
+                    drop(timeout_owners);
                 }
             });
+        #[cfg(test)]
+        self.0
+            .query_timeout_tasks
+            .lock()
+            .unwrap()
+            .push(timeout_task);
+        #[cfg(not(test))]
+        drop(timeout_task);
 
         tracing::trace!("Register query {} (nb_final = {})", qid, nb_final);
-        state.queries.insert(
+        query_owners.0.queries.insert(
             qid,
             QueryState {
                 nb_final,
@@ -2785,12 +2828,13 @@ impl Session {
                 parameters: parameters.clone().into_owned(),
                 reception_mode: consolidation,
                 replies: (consolidation != ConsolidationMode::None).then(HashMap::new),
-                callback,
+                callback: query_owners.1,
                 querier_id,
                 _timeout_cancellation: timeout_cancellation,
+                _retained_capacity: query_owners.2,
             },
         );
-        drop(state);
+        drop(query_owners.0);
 
         #[cfg(not(feature = "unstable"))]
         let ext_ts_stack = None;
@@ -3431,7 +3475,7 @@ impl Primitives for WeakSession {
                 }
                 match state.queries.get_mut(&msg.rid) {
                     Some(query) => {
-                        let callback = query.callback.clone();
+                        let callback = (query.callback.clone(), query._retained_capacity.clone());
                         std::mem::drop(state);
                         let new_reply = Reply {
                             result: Err(ReplyError {
@@ -3451,7 +3495,7 @@ impl Primitives for WeakSession {
                                 }
                             }),
                         };
-                        callback.call(new_reply);
+                        callback.0.call(new_reply);
                     }
                     None => {
                         tracing::warn!("Received ReplyData for unknown Query: {}", msg.rid);
@@ -3505,9 +3549,10 @@ impl Primitives for WeakSession {
 
                         let callback =
                             match query.reception_mode {
-                                ConsolidationMode::None => {
-                                    Some((query.callback.clone(), new_reply))
-                                }
+                                ConsolidationMode::None => Some((
+                                    (query.callback.clone(), query._retained_capacity.clone()),
+                                    new_reply,
+                                )),
                                 ConsolidationMode::Monotonic => {
                                     match query.replies.as_ref().unwrap().get(
                                         new_reply.result.as_ref().unwrap().key_expr.as_keyexpr(),
@@ -3526,7 +3571,13 @@ impl Primitives for WeakSession {
                                                         .into(),
                                                     new_reply.clone(),
                                                 );
-                                                Some((query.callback.clone(), new_reply))
+                                                Some((
+                                                    (
+                                                        query.callback.clone(),
+                                                        query._retained_capacity.clone(),
+                                                    ),
+                                                    new_reply,
+                                                ))
                                             } else {
                                                 None
                                             }
@@ -3542,7 +3593,13 @@ impl Primitives for WeakSession {
                                                     .into(),
                                                 new_reply.clone(),
                                             );
-                                            Some((query.callback.clone(), new_reply))
+                                            Some((
+                                                (
+                                                    query.callback.clone(),
+                                                    query._retained_capacity.clone(),
+                                                ),
+                                                new_reply,
+                                            ))
                                         }
                                     }
                                 }
@@ -3584,7 +3641,7 @@ impl Primitives for WeakSession {
                             };
                         std::mem::drop(state);
                         if let Some((callback, new_reply)) = callback {
-                            callback.call(new_reply);
+                            callback.0.call(new_reply);
                         }
                     }
                     None => {
@@ -3906,18 +3963,30 @@ mod query_identifiers {
 mod query_retirement {
     use std::{
         mem,
-        sync::{Arc, Mutex},
+        num::NonZeroUsize,
+        panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
+        sync::{atomic::Ordering, Arc, Mutex},
+        thread,
         time::Duration,
     };
 
-    use zenoh_config::Config;
-    use zenoh_core::zwrite;
+    use tokio::{
+        runtime::Handle,
+        sync::{oneshot, Semaphore, TryAcquireError},
+    };
+    use zenoh_config::{Config, ModeDependentValue};
+    use zenoh_core::{zwrite, Wait};
+    use zenoh_protocol::network::{RequestId, ResponseFinal};
+    use zenoh_runtime::ZRuntime;
 
     use crate::{
         handlers::CallbackDrop,
+        net::{primitives::Primitives, runtime::RUNTIME_CONSTRUCTION_ENTRIES},
         query::{ConsolidationMode, Query, Reply},
         sample::Locality,
     };
+
+    use super::{Session, SessionClosedError};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn retired_queriers_release_timeouts_while_native_queries_are_retained() {
@@ -4125,5 +4194,1256 @@ mod query_retirement {
             owner_retirement.is_ok(),
             "completed query timers must release their Session owners before the query deadline"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn completed_queries_retain_timeout_owners_before_net_can_poll() {
+        let mut config = Config::default();
+        config.scouting.multicast.set_enabled(Some(false)).unwrap();
+        config.scouting.gossip.set_enabled(Some(false)).unwrap();
+        config.listen.endpoints.set(Vec::new()).unwrap();
+        config.connect.endpoints.set(Vec::new()).unwrap();
+        let session = crate::open(config).await.unwrap();
+        let key_expr = "query/retirement/unpolled";
+        let queries = Arc::new(Mutex::new(Vec::<Query>::new()));
+        let received_queries = queries.clone();
+        let queryable = session
+            .declare_queryable(key_expr)
+            .allowed_origin(Locality::SessionLocal)
+            .callback(move |query| received_queries.lock().unwrap().push(query))
+            .await
+            .unwrap();
+        let replies = Arc::new(Mutex::new(Vec::<(u8, Reply)>::new()));
+        let completions = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let net_session = session.clone();
+        let net_replies = replies.clone();
+        let net_completions = completions.clone();
+        // The focused process configures Net with exactly one worker. Run on
+        // that SAME worker, with no await/block_in_place until every snapshot
+        // is captured. Synchronous local FINAL cannot poll a queued timeout.
+        let native_schedule = ZRuntime::Net.spawn(async move {
+            let net_workers = Handle::current().metrics().num_workers();
+            let baseline_owners = Arc::strong_count(&net_session.0);
+            let mut request_receipts = Vec::new();
+            let mut reply_receipts = Vec::new();
+            let mut request_originals = Vec::new();
+            let mut pending_before_requests = Vec::new();
+            let mut inventories = Vec::new();
+            let mut live_query = None;
+            let mut retired_query_final = None;
+            for marker in *b"BAC" {
+                let pending = zwrite!(net_session.0.state).queries.len();
+                let received_replies = net_replies.clone();
+                let completed_queries = net_completions.clone();
+                let issued = net_session
+                    .get(key_expr)
+                    .allowed_destination(Locality::SessionLocal)
+                    .consolidation(ConsolidationMode::None)
+                    .timeout(Duration::from_secs(60))
+                    .payload(vec![marker])
+                    .with(CallbackDrop {
+                        callback: move |reply: Reply| {
+                            received_replies.lock().unwrap().push((marker, reply));
+                        },
+                        drop: move || completed_queries.lock().unwrap().push(marker),
+                    })
+                    .wait();
+                request_receipts.push((marker, issued));
+                let registered = zwrite!(net_session.0.state).queries.len();
+                pending_before_requests.push((marker, pending, registered));
+                let native_query = queries.lock().unwrap().pop();
+                match native_query {
+                    Some(query) => {
+                        let payload = query.payload().map(|bytes| bytes.to_bytes().into_owned());
+                        request_originals.push((marker, Some((query.inner.qid, payload))));
+                        match marker {
+                            b'B' => live_query = Some(query),
+                            b'A' => {
+                                retired_query_final = Some(ResponseFinal {
+                                    rid: query.inner.qid,
+                                    ext_qos: query.inner.qos.into(),
+                                    ext_tstamp: None,
+                                });
+                                let replied = query.reply(key_expr, vec![marker]).wait();
+                                reply_receipts.push((marker, Some(replied)));
+                                drop(query);
+                            }
+                            _ => {
+                                let replied = query.reply(key_expr, vec![marker]).wait();
+                                reply_receipts.push((marker, Some(replied)));
+                                drop(query);
+                            }
+                        }
+                    }
+                    None => {
+                        request_originals.push((marker, None));
+                        reply_receipts.push((marker, None));
+                    }
+                }
+                let pending = zwrite!(net_session.0.state).queries.len();
+                inventories.push((marker, pending, Arc::strong_count(&net_session.0)));
+            }
+            if let Some(final_reply) = &mut retired_query_final {
+                net_session.downgrade().send_response_final(final_reply);
+            }
+            let replay_pending = zwrite!(net_session.0.state)
+                .queries
+                .keys()
+                .copied()
+                .collect::<Vec<_>>();
+            let replay_owners = Arc::strong_count(&net_session.0);
+            if let Some(query) = live_query {
+                let replied = query.reply(key_expr, vec![b'B']).wait();
+                reply_receipts.push((b'B', Some(replied)));
+                drop(query);
+            }
+            let final_pending = zwrite!(net_session.0.state).queries.len();
+            let final_owners = Arc::strong_count(&net_session.0);
+            let residual_queries = queries.lock().unwrap().len();
+            (
+                net_workers,
+                baseline_owners,
+                pending_before_requests,
+                inventories,
+                request_originals,
+                request_receipts,
+                reply_receipts,
+                retired_query_final,
+                replay_pending,
+                replay_owners,
+                final_pending,
+                final_owners,
+                residual_queries,
+            )
+        });
+        let native_schedule_receipt = native_schedule.await;
+        let queryable_retirement = queryable.undeclare().await;
+        let session_close = session.close().await;
+        // Native schedule, all actual callbacks and both cleanup owners are
+        // acquired before classifying the resource inventory or consumer trace.
+        assert!(queryable_retirement.is_ok());
+        assert!(session_close.is_ok());
+        let (
+            net_workers,
+            baseline_owners,
+            pending_before_requests,
+            inventories,
+            request_originals,
+            request_receipts,
+            reply_receipts,
+            retired_query_final,
+            replay_pending,
+            replay_owners,
+            final_pending,
+            final_owners,
+            residual_queries,
+        ) = native_schedule_receipt.expect("the original native schedule joined");
+        assert_eq!(
+            net_workers, 1,
+            "the actual native Net runtime uses one worker"
+        );
+        eprintln!("native timeout captures: workers={net_workers}, baseline={baseline_owners}, inventories={inventories:?}, pending={pending_before_requests:?}, replay={replay_pending:?}/{replay_owners}, final={final_pending}/{final_owners}");
+        assert!(request_receipts.iter().all(|(_, receipt)| receipt.is_ok()));
+        assert!(reply_receipts
+            .iter()
+            .all(|(_, receipt)| matches!(receipt, Some(Ok(())))));
+        assert_eq!(
+            pending_before_requests,
+            vec![(b'B', 0, 1), (b'A', 1, 2), (b'C', 1, 2)]
+        );
+        let issued_ids = request_originals
+            .iter()
+            .map(|(_, original)| original.as_ref().map(|(id, _)| *id))
+            .collect::<Vec<_>>();
+        assert_eq!(issued_ids.len(), 3);
+        assert!(issued_ids.iter().all(Option::is_some));
+        assert_ne!(issued_ids[0], issued_ids[1]);
+        assert_ne!(issued_ids[0], issued_ids[2]);
+        assert_ne!(issued_ids[1], issued_ids[2]);
+        for (marker, original) in &request_originals {
+            assert_eq!(
+                original
+                    .as_ref()
+                    .and_then(|(_, payload)| payload.as_deref()),
+                Some(&[*marker][..])
+            );
+        }
+        assert_eq!(
+            retired_query_final.as_ref().map(|reply| reply.rid),
+            issued_ids[1]
+        );
+        let live_identifier = issued_ids[0].expect("B's actual identifier");
+        assert_eq!(replay_pending, vec![live_identifier]);
+        // B's QueryInner owns one additional Session reference. Once B's
+        // Query is dropped, only the three unpolled timeout captures remain.
+        assert_eq!(
+            inventories,
+            vec![
+                (b'B', 1, baseline_owners + 2),
+                (b'A', 1, baseline_owners + 3),
+                (b'C', 1, baseline_owners + 4)
+            ]
+        );
+        assert_eq!(replay_owners, baseline_owners + 4);
+        assert_eq!(final_pending, 0);
+        assert_eq!(
+            final_owners,
+            baseline_owners + 3,
+            "a live-map budget of two misses three unpolled native Session captures"
+        );
+        assert_eq!(residual_queries, 0);
+        let reply_originals = replies.lock().unwrap();
+        let actual_replies = reply_originals
+            .iter()
+            .map(|(marker, reply)| {
+                (
+                    *marker,
+                    reply
+                        .result()
+                        .ok()
+                        .map(|sample| sample.payload().to_bytes().into_owned()),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual_replies,
+            vec![
+                (b'A', Some(vec![b'A'])),
+                (b'C', Some(vec![b'C'])),
+                (b'B', Some(vec![b'B']))
+            ]
+        );
+        let completion_originals = completions.lock().unwrap();
+        assert_eq!(completion_originals.as_slice(), b"ACB");
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn retained_query_capacity_waits_for_native_timeout_destruction() {
+        let mut config = Config::default();
+        config.scouting.multicast.set_enabled(Some(false)).unwrap();
+        config.scouting.gossip.set_enabled(Some(false)).unwrap();
+        config.listen.endpoints.set(Vec::new()).unwrap();
+        config.connect.endpoints.set(Vec::new()).unwrap();
+        config
+            .set_queries_max_retained(NonZeroUsize::new(2))
+            .unwrap();
+        let session = crate::open(config).await.unwrap();
+        let capacity = session.0.query_capacity.as_ref().unwrap().clone();
+        let key_expr = "query/capacity/native-retirement";
+        let queries = Arc::new(Mutex::new(Vec::<Query>::new()));
+        let received_queries = queries.clone();
+        let queryable = session
+            .declare_queryable(key_expr)
+            .allowed_origin(Locality::SessionLocal)
+            .callback(move |query| received_queries.lock().unwrap().push(query))
+            .await
+            .unwrap();
+        let replies = Arc::new(Mutex::new(Vec::<(u8, Reply)>::new()));
+        let completions = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let net_session = session.clone();
+        let net_replies = replies.clone();
+        let net_completions = completions.clone();
+        let net_capacity = capacity.clone();
+        let net_queries = queries.clone();
+        let native_schedule = ZRuntime::Net.spawn(async move {
+            let workers = Handle::current().metrics().num_workers();
+            let baseline_owners = Arc::strong_count(&net_session.0);
+            let mut requests = Vec::new();
+            let mut native_originals = Vec::new();
+            let mut replies = Vec::new();
+            let mut inventories = Vec::new();
+            let mut permits = Vec::new();
+            let mut live_query = None;
+            let mut retired_final = None;
+            for marker in *b"BAC" {
+                let received = net_replies.clone();
+                let completed = net_completions.clone();
+                let request = net_session
+                    .get(key_expr)
+                    .allowed_destination(Locality::SessionLocal)
+                    .consolidation(ConsolidationMode::None)
+                    .timeout(Duration::from_secs(60))
+                    .payload(vec![marker])
+                    .with(CallbackDrop {
+                        callback: move |reply: Reply| {
+                            received.lock().unwrap().push((marker, reply))
+                        },
+                        drop: move || completed.lock().unwrap().push(marker),
+                    })
+                    .wait();
+                requests.push((marker, request));
+                let original = net_queries.lock().unwrap().pop();
+                match original {
+                    Some(query) => {
+                        let id = query.inner.qid;
+                        let payload = query.payload().map(|bytes| bytes.to_bytes().into_owned());
+                        let permit =
+                            zwrite!(net_session.0.state)
+                                .queries
+                                .get(&id)
+                                .and_then(|query| {
+                                    query._retained_capacity.as_ref().map(Arc::downgrade)
+                                });
+                        permits.push(permit);
+                        native_originals.push((marker, Some((id, payload))));
+                        match marker {
+                            b'B' => live_query = Some(query),
+                            _ => {
+                                retired_final = Some(ResponseFinal {
+                                    rid: id,
+                                    ext_qos: query.inner.qos.into(),
+                                    ext_tstamp: None,
+                                });
+                                let reply = query.reply(key_expr, vec![marker]).wait();
+                                replies.push((marker, reply));
+                                drop(query);
+                            }
+                        }
+                    }
+                    None => native_originals.push((marker, None)),
+                }
+                inventories.push((
+                    marker,
+                    zwrite!(net_session.0.state).queries.len(),
+                    net_capacity.available_permits(),
+                    Arc::strong_count(&net_session.0),
+                ));
+            }
+            if let Some(final_reply) = &mut retired_final {
+                net_session.downgrade().send_response_final(final_reply);
+            }
+            let replay_ids = zwrite!(net_session.0.state)
+                .queries
+                .keys()
+                .copied()
+                .collect::<Vec<_>>();
+            let replay_capacity = net_capacity.available_permits();
+            if let Some(query) = live_query {
+                let reply = query.reply(key_expr, vec![b'B']).wait();
+                replies.push((b'B', reply));
+                drop(query);
+            }
+            let final_inventory = (
+                zwrite!(net_session.0.state).queries.len(),
+                net_capacity.available_permits(),
+                Arc::strong_count(&net_session.0),
+            );
+            (
+                workers,
+                baseline_owners,
+                requests,
+                native_originals,
+                replies,
+                inventories,
+                permits,
+                retired_final,
+                replay_ids,
+                replay_capacity,
+                final_inventory,
+            )
+        });
+        let native_schedule_receipt = native_schedule.await;
+        // Wait for actual captured owners to retire, independently of map removal.
+        let capacity_retirement = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if capacity.available_permits() == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let fresh_replies = replies.clone();
+        let fresh_completions = completions.clone();
+        let fresh_receipt = session
+            .get(key_expr)
+            .allowed_destination(Locality::SessionLocal)
+            .consolidation(ConsolidationMode::None)
+            .payload(vec![b'D'])
+            .with(CallbackDrop {
+                callback: move |reply: Reply| fresh_replies.lock().unwrap().push((b'D', reply)),
+                drop: move || fresh_completions.lock().unwrap().push(b'D'),
+            })
+            .await;
+        // Retain D's actual payload/reply before dropping its original producer
+        // Query sends FINAL and retires the corresponding map registration.
+        let fresh_original = queries.lock().unwrap().pop();
+        let fresh_id = fresh_original.as_ref().map(|query| query.inner.qid);
+        let fresh_payload = fresh_original
+            .as_ref()
+            .and_then(|query| query.payload().map(|bytes| bytes.to_bytes().into_owned()));
+        let fresh_reply = match &fresh_original {
+            Some(query) => Some(query.reply(key_expr, vec![b'D']).await),
+            None => None,
+        };
+        drop(fresh_original);
+        let queryable_retirement = queryable.undeclare().await;
+        let session_close = session.close().await;
+        let timeout_tasks = mem::take(&mut *session.0.query_timeout_tasks.lock().unwrap());
+        let mut timeout_receipts = Vec::new();
+        for task in timeout_tasks {
+            timeout_receipts.push(task.await);
+        }
+        let final_available = capacity.available_permits();
+        assert!(queryable_retirement.is_ok());
+        assert!(session_close.is_ok());
+        assert!(timeout_receipts.iter().all(Result::is_ok));
+        let (
+            workers,
+            baseline,
+            requests,
+            originals,
+            reply_receipts,
+            inventories,
+            permits,
+            retired_final,
+            replay_ids,
+            replay_capacity,
+            final_inventory,
+        ) = native_schedule_receipt.expect("the actual native schedule joined");
+        assert_eq!(workers, 1, "the actual Net runtime uses one worker");
+        assert!(requests[0].1.is_ok());
+        assert!(requests[1].1.is_ok());
+        assert!(
+            requests[2].1.is_err(),
+            "capacity+1 must refuse before native admission"
+        );
+        assert!(matches!(
+            requests[2]
+                .1
+                .as_ref()
+                .err()
+                .and_then(|cause| cause.downcast_ref::<TryAcquireError>()),
+            Some(TryAcquireError::NoPermits)
+        ));
+        assert_eq!(originals.len(), 3);
+        assert_eq!(
+            originals[2],
+            (b'C', None),
+            "refused C never reaches the native queryable"
+        );
+        let b_id = originals[0].1.as_ref().map(|(id, _)| *id);
+        let a_id = originals[1].1.as_ref().map(|(id, _)| *id);
+        assert!(b_id.is_some());
+        assert!(a_id.is_some());
+        assert_ne!(b_id, a_id);
+        assert_eq!(
+            originals[0]
+                .1
+                .as_ref()
+                .and_then(|(_, value)| value.as_deref()),
+            Some(&b"B"[..])
+        );
+        assert_eq!(
+            originals[1]
+                .1
+                .as_ref()
+                .and_then(|(_, value)| value.as_deref()),
+            Some(&b"A"[..])
+        );
+        assert_eq!(retired_final.as_ref().map(|reply| reply.rid), a_id);
+        assert_eq!(replay_ids.as_slice(), &[b_id.unwrap()]);
+        assert_eq!(replay_capacity, 0);
+        assert_eq!(
+            inventories,
+            vec![
+                (b'B', 1, 1, baseline + 2),
+                (b'A', 1, 0, baseline + 3),
+                (b'C', 1, 0, baseline + 3)
+            ]
+        );
+        assert_eq!(
+            final_inventory,
+            (0, 0, baseline + 2),
+            "native captures retain capacity after FINAL removes every map entry"
+        );
+        assert!(
+            permits.iter().all(|permit| permit
+                .as_ref()
+                .is_some_and(|permit| permit.strong_count() == 0)),
+            "both original shared permits retire before capacity reuse"
+        );
+        assert!(capacity_retirement.is_ok());
+        assert!(fresh_receipt.is_ok());
+        assert!(fresh_id.is_some());
+        assert_ne!(fresh_id, b_id);
+        assert_ne!(fresh_id, a_id);
+        assert_eq!(fresh_payload.as_deref(), Some(&b"D"[..]));
+        assert!(matches!(fresh_reply, Some(Ok(()))));
+        assert!(reply_receipts.iter().all(|(_, receipt)| receipt.is_ok()));
+        let actual_replies = replies
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(marker, reply)| {
+                (
+                    *marker,
+                    reply
+                        .result()
+                        .ok()
+                        .map(|sample| sample.payload().to_bytes().into_owned()),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual_replies,
+            vec![
+                (b'A', Some(vec![b'A'])),
+                (b'B', Some(vec![b'B'])),
+                (b'D', Some(vec![b'D']))
+            ]
+        );
+        let mut actual_completions = completions.lock().unwrap().clone();
+        actual_completions.sort_unstable();
+        assert_eq!(actual_completions, b"ABCD");
+        assert_eq!(final_available, 2);
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn rejected_query_keeps_capacity_through_callback_destruction() {
+        let mut config = Config::default();
+        config.scouting.multicast.set_enabled(Some(false)).unwrap();
+        config.scouting.gossip.set_enabled(Some(false)).unwrap();
+        config.listen.endpoints.set(Vec::new()).unwrap();
+        config.connect.endpoints.set(Vec::new()).unwrap();
+        config
+            .set_queries_max_retained(NonZeroUsize::new(1))
+            .unwrap();
+        let session = crate::open(config).await.unwrap();
+        let capacity = session.0.query_capacity.as_ref().unwrap().clone();
+        zwrite!(session.0.state)
+            .qid_counter
+            .store(RequestId::MAX, Ordering::SeqCst);
+        let callback_receipt = Arc::new(Mutex::new(None));
+        let observed = callback_receipt.clone();
+        let callback_session = session.clone();
+        let callback_capacity = capacity.clone();
+        let rejected = session
+            .get("query/capacity/rejected-original")
+            .allowed_destination(Locality::SessionLocal)
+            .with(CallbackDrop {
+                callback: |_: Reply| panic!("a refused query cannot reply"),
+                drop: move || {
+                    let retained_capacity = callback_capacity.available_permits();
+                    // Exercise actual reentrant admission, rather than infer that
+                    // the owning state lock was released before this destructor.
+                    let reentrant = callback_session
+                        .get("query/capacity/reentrant")
+                        .allowed_destination(Locality::SessionLocal)
+                        .wait();
+                    *observed.lock().unwrap() = Some((retained_capacity, reentrant));
+                },
+            })
+            .await;
+        let after_destruction = capacity.available_permits();
+        let pending_queries = zwrite!(session.0.state).queries.len();
+        let timeout_tasks = mem::take(&mut *session.0.query_timeout_tasks.lock().unwrap());
+        let spawned_tasks = timeout_tasks.len();
+        let mut timeout_receipts = Vec::new();
+        for task in timeout_tasks {
+            timeout_receipts.push(task.await);
+        }
+        let session_close = session.close().await;
+        assert!(session_close.is_ok());
+        assert!(timeout_receipts.iter().all(Result::is_ok));
+        let callback_original = callback_receipt.lock().unwrap();
+        let (retained_capacity, reentrant) = callback_original
+            .as_ref()
+            .expect("the actual rejected callback destructor completed");
+        assert_eq!(
+            *retained_capacity, 0,
+            "a reserved unit must remain held through rejected callback destruction"
+        );
+        assert!(rejected.as_ref().err().is_some_and(|error| error
+            .to_string()
+            .starts_with("Query identifier space exhausted")));
+        assert!(matches!(
+            reentrant
+                .as_ref()
+                .err()
+                .and_then(|cause| cause.downcast_ref::<TryAcquireError>()),
+            Some(TryAcquireError::NoPermits)
+        ));
+        assert_eq!(after_destruction, 1);
+        assert_eq!(pending_queries, 0);
+        assert_eq!(spawned_tasks, 0);
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn aborted_timeout_keeps_the_live_query_capacity_reserved() {
+        let mut config = Config::default();
+        config.scouting.multicast.set_enabled(Some(false)).unwrap();
+        config.scouting.gossip.set_enabled(Some(false)).unwrap();
+        config.listen.endpoints.set(Vec::new()).unwrap();
+        config.connect.endpoints.set(Vec::new()).unwrap();
+        config
+            .set_queries_max_retained(NonZeroUsize::new(1))
+            .unwrap();
+        let session = crate::open(config).await.unwrap();
+        let capacity = session.0.query_capacity.as_ref().unwrap().clone();
+        let queryable = session
+            .declare_queryable("query/capacity/aborted")
+            .allowed_origin(Locality::SessionLocal)
+            .await
+            .unwrap();
+        let replies = session
+            .get("query/capacity/aborted")
+            .allowed_destination(Locality::SessionLocal)
+            .consolidation(ConsolidationMode::None)
+            .payload(*b"A")
+            .timeout(Duration::from_secs(60))
+            .await;
+        let query = queryable.recv_async().await;
+        let task = session.0.query_timeout_tasks.lock().unwrap().pop().unwrap();
+        task.abort();
+        let aborted_timeout = task.await;
+        let live_inventory = (
+            zwrite!(session.0.state).queries.len(),
+            capacity.available_permits(),
+        );
+        let refused = session
+            .get("query/capacity/aborted")
+            .allowed_destination(Locality::SessionLocal)
+            .payload(*b"C")
+            .await;
+        let rejected_delivery = queryable.try_recv();
+        let native_payload = query
+            .as_ref()
+            .ok()
+            .and_then(|query| query.payload().map(|bytes| bytes.to_bytes().into_owned()));
+        let reply = query
+            .as_ref()
+            .ok()
+            .map(|query| query.reply("query/capacity/aborted", *b"A").wait());
+        drop(query);
+        let released_capacity = capacity.available_permits();
+        let fresh = session
+            .get("query/capacity/aborted")
+            .allowed_destination(Locality::SessionLocal)
+            .payload(*b"D")
+            .await;
+        let fresh_query = queryable.try_recv();
+        let fresh_payload = fresh_query.as_ref().ok().and_then(|query| {
+            query
+                .as_ref()
+                .and_then(|query| query.payload().map(|bytes| bytes.to_bytes().into_owned()))
+        });
+        let fresh_reply = fresh_query.as_ref().ok().and_then(|query| {
+            query
+                .as_ref()
+                .map(|query| query.reply("query/capacity/aborted", *b"D").wait())
+        });
+        drop(fresh_query);
+        let declaration_retirement = queryable.undeclare().await;
+        let closed = session.close().await;
+        let remaining_tasks = mem::take(&mut *session.0.query_timeout_tasks.lock().unwrap());
+        let mut remaining_receipts = Vec::new();
+        for task in remaining_tasks {
+            remaining_receipts.push(task.await);
+        }
+        let original_delivery = replies.as_ref().ok().map(|receiver| receiver.try_recv());
+        let fresh_delivery = fresh.as_ref().ok().map(|receiver| receiver.try_recv());
+        assert!(declaration_retirement.is_ok());
+        assert!(closed.is_ok());
+        assert!(matches!(&aborted_timeout, Err(error) if error.is_cancelled()));
+        assert_eq!(
+            live_inventory,
+            (1, 0),
+            "aborting the actual timeout cannot free a live map owner"
+        );
+        assert!(matches!(
+            refused
+                .as_ref()
+                .err()
+                .and_then(|cause| cause.downcast_ref::<TryAcquireError>()),
+            Some(TryAcquireError::NoPermits)
+        ));
+        assert!(matches!(rejected_delivery, Ok(None)));
+        assert_eq!(native_payload.as_deref(), Some(&b"A"[..]));
+        assert!(matches!(reply, Some(Ok(()))));
+        assert!(replies.is_ok());
+        assert_eq!(released_capacity, 1);
+        assert!(fresh.is_ok());
+        assert_eq!(fresh_payload.as_deref(), Some(&b"D"[..]));
+        assert!(matches!(fresh_reply, Some(Ok(()))));
+        for (delivery, expected) in [(&original_delivery, b'A'), (&fresh_delivery, b'D')] {
+            let original = delivery
+                .as_ref()
+                .and_then(|receipt| receipt.as_ref().ok())
+                .and_then(Option::as_ref);
+            let payload = original
+                .and_then(|reply| reply.result().ok())
+                .map(|sample| sample.payload().to_bytes().into_owned());
+            assert_eq!(payload.as_deref(), Some(&[expected][..]));
+        }
+        assert!(remaining_receipts.iter().all(Result::is_ok));
+        assert_eq!(capacity.available_permits(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn timeout_callback_unwind_destroys_originals_before_capacity_reuse() {
+        let mut config = Config::default();
+        config.scouting.multicast.set_enabled(Some(false)).unwrap();
+        config.scouting.gossip.set_enabled(Some(false)).unwrap();
+        config.listen.endpoints.set(Vec::new()).unwrap();
+        config.connect.endpoints.set(Vec::new()).unwrap();
+        config
+            .set_queries_max_retained(NonZeroUsize::new(1))
+            .unwrap();
+        let session = crate::open(config).await.unwrap();
+        let capacity = session.0.query_capacity.as_ref().unwrap().clone();
+        let queryable = session
+            .declare_queryable("query/capacity/unwind")
+            .allowed_origin(Locality::SessionLocal)
+            .await
+            .unwrap();
+        let callback_original = Arc::new(b'A');
+        let original_weak = Arc::downgrade(&callback_original);
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_replies = observed.clone();
+        let destructor_capacity = capacity.clone();
+        let destructor_observation = Arc::new(Mutex::new(None));
+        let destruction = destructor_observation.clone();
+        let mut panic_original = Some(Box::new(b'P'));
+        let panic_pointer = panic_original.as_ref().unwrap().as_ref() as *const u8 as usize;
+        let request = session
+            .get("query/capacity/unwind")
+            .allowed_destination(Locality::SessionLocal)
+            .payload(*b"A")
+            .timeout(Duration::ZERO)
+            .with(CallbackDrop {
+                callback: move |reply: Reply| {
+                    observed_replies
+                        .lock()
+                        .unwrap()
+                        .push((*callback_original, reply))
+                },
+                drop: move || {
+                    *destruction.lock().unwrap() = Some(destructor_capacity.available_permits());
+                    let original = panic_original
+                        .take()
+                        .expect("the destructor owns its one original panic");
+                    resume_unwind(original);
+                },
+            })
+            .await;
+        let query = queryable.recv_async().await;
+        let task = session.0.query_timeout_tasks.lock().unwrap().pop().unwrap();
+        let timeout_receipt = task.await;
+        let after_unwind = (original_weak.strong_count(), capacity.available_permits());
+        let original_payload = query
+            .as_ref()
+            .ok()
+            .and_then(|query| query.payload().map(|bytes| bytes.to_bytes().into_owned()));
+        let producer_retirement = catch_unwind(AssertUnwindSafe(|| drop(query)));
+        let fresh = session
+            .get("query/capacity/unwind")
+            .allowed_destination(Locality::SessionLocal)
+            .payload(*b"D")
+            .await;
+        let fresh_query = queryable.try_recv();
+        let fresh_payload = fresh_query.as_ref().ok().and_then(|query| {
+            query
+                .as_ref()
+                .and_then(|query| query.payload().map(|bytes| bytes.to_bytes().into_owned()))
+        });
+        let fresh_reply = fresh_query.as_ref().ok().and_then(|query| {
+            query
+                .as_ref()
+                .map(|query| query.reply("query/capacity/unwind", *b"D").wait())
+        });
+        drop(fresh_query);
+        let declaration_retirement = queryable.undeclare().await;
+        let closed = session.close().await;
+        let remaining_tasks = mem::take(&mut *session.0.query_timeout_tasks.lock().unwrap());
+        let mut remaining_receipts = Vec::new();
+        for task in remaining_tasks {
+            remaining_receipts.push(task.await);
+        }
+        assert!(declaration_retirement.is_ok());
+        assert!(closed.is_ok());
+        assert!(request.is_ok());
+        assert_eq!(original_payload.as_deref(), Some(&b"A"[..]));
+        assert_eq!(*destructor_observation.lock().unwrap(), Some(0));
+        assert_eq!(
+            after_unwind,
+            (0, 1),
+            "native callback and timeout captures retire before capacity reuse"
+        );
+        assert!(producer_retirement.is_ok());
+        assert!(fresh.is_ok());
+        assert_eq!(fresh_payload.as_deref(), Some(&b"D"[..]));
+        assert!(matches!(fresh_reply, Some(Ok(()))));
+        assert!(remaining_receipts.iter().all(Result::is_ok));
+        let original_replies = observed.lock().unwrap();
+        assert_eq!(original_replies.len(), 1);
+        assert_eq!(original_replies[0].0, b'A');
+        assert!(original_replies[0].1.result().is_err());
+        let original_join_error = timeout_receipt.expect_err("the original timeout task panicked");
+        assert!(original_join_error.is_panic());
+        let native_panic_original = original_join_error.into_panic();
+        let native_panic_pointer = native_panic_original.as_ref() as *const _ as *const () as usize;
+        assert_eq!(
+            native_panic_pointer, panic_pointer,
+            "the original opaque panic allocation survives joining"
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    enum ActiveReplyKind {
+        Error,
+        Unconsolidated,
+        MonotonicFirst,
+        MonotonicNewer,
+        Latest,
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn active_reply_callback_retains_its_original_query_capacity() {
+        active_reply_callback_retirement(ActiveReplyKind::Unconsolidated).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn active_error_reply_callback_retains_its_original_query_capacity() {
+        active_reply_callback_retirement(ActiveReplyKind::Error).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn active_first_monotonic_reply_callback_retains_its_original_query_capacity() {
+        active_reply_callback_retirement(ActiveReplyKind::MonotonicFirst).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn active_newer_monotonic_reply_callback_retains_its_original_query_capacity() {
+        active_reply_callback_retirement(ActiveReplyKind::MonotonicNewer).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn active_latest_reply_callback_retains_its_original_query_capacity() {
+        active_reply_callback_retirement(ActiveReplyKind::Latest).await;
+    }
+
+    async fn active_reply_callback_retirement(reply_kind: ActiveReplyKind) {
+        let mut config = Config::default();
+        config.scouting.multicast.set_enabled(Some(false)).unwrap();
+        config.scouting.gossip.set_enabled(Some(false)).unwrap();
+        config.listen.endpoints.set(Vec::new()).unwrap();
+        config.connect.endpoints.set(Vec::new()).unwrap();
+        config
+            .set_queries_max_retained(NonZeroUsize::new(1))
+            .unwrap();
+        config
+            .timestamping
+            .set_enabled(Some(ModeDependentValue::Unique(true)))
+            .unwrap();
+        let session = crate::open(config).await.unwrap();
+        let timestamps = (session.new_timestamp(), session.new_timestamp());
+        let capacity = session.0.query_capacity.as_ref().unwrap().clone();
+        let key_expr = "query/capacity/active-reply";
+        let queryable = session
+            .declare_queryable(key_expr)
+            .allowed_origin(Locality::SessionLocal)
+            .await
+            .unwrap();
+        let (entered, entry) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let entered = Mutex::new(Some(entered));
+        let released = Mutex::new(Some(released));
+        let prefix_replies = Arc::new(Mutex::new(Vec::new()));
+        let prefix_observations = prefix_replies.clone();
+        let callback_receipts = Arc::new(Mutex::new(None));
+        let callback_observations = callback_receipts.clone();
+        let marker = Arc::new(Box::new(*b"A"));
+        let original_marker = Arc::downgrade(&marker);
+        let mut marker = Some(marker);
+        let initial = session
+            .get(key_expr)
+            .allowed_destination(Locality::SessionLocal)
+            .consolidation(match reply_kind {
+                ActiveReplyKind::Error | ActiveReplyKind::Unconsolidated => ConsolidationMode::None,
+                ActiveReplyKind::MonotonicFirst | ActiveReplyKind::MonotonicNewer => {
+                    ConsolidationMode::Monotonic
+                }
+                ActiveReplyKind::Latest => ConsolidationMode::Latest,
+            })
+            .timeout(Duration::from_secs(60))
+            .payload(*b"A")
+            .with(CallbackDrop {
+                callback: move |reply: Reply| {
+                    match reply.result() {
+                        Ok(sample) if sample.payload().to_bytes().as_ref() == b"P" => {
+                            prefix_observations.lock().unwrap().push(reply);
+                            return;
+                        }
+                        Ok(_) | Err(_) => {}
+                    }
+                    #[expect(
+                        clippy::result_large_err,
+                        reason = "Retain the original native Reply if notification is refused"
+                    )]
+                    let publication = entered
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .map(|sender| sender.send(reply));
+                    let permission = released
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .map(|receiver| receiver.blocking_recv());
+                    *callback_observations.lock().unwrap() = Some((publication, permission));
+                },
+                drop: move || drop(marker.take()),
+            })
+            .await;
+        let producer = queryable.recv_async().await.unwrap();
+        let actual_id = producer.inner.qid;
+        let actual_payload = producer
+            .payload()
+            .map(|bytes| bytes.to_bytes().into_owned());
+        let mut final_reply = ResponseFinal {
+            rid: actual_id,
+            ext_qos: producer.inner.qos.into(),
+            ext_tstamp: None,
+        };
+        let reply_producer = thread::spawn(move || {
+            let prefix = match reply_kind {
+                ActiveReplyKind::MonotonicNewer => Some(
+                    producer
+                        .reply(key_expr, *b"P")
+                        .timestamp(timestamps.0)
+                        .wait(),
+                ),
+                ActiveReplyKind::Error
+                | ActiveReplyKind::Unconsolidated
+                | ActiveReplyKind::MonotonicFirst
+                | ActiveReplyKind::Latest => None,
+            };
+            let reply = match reply_kind {
+                ActiveReplyKind::Error => producer.reply_err(*b"A").wait(),
+                ActiveReplyKind::MonotonicNewer => producer
+                    .reply(key_expr, *b"A")
+                    .timestamp(timestamps.1)
+                    .wait(),
+                ActiveReplyKind::Unconsolidated
+                | ActiveReplyKind::MonotonicFirst
+                | ActiveReplyKind::Latest => producer
+                    .reply(key_expr, *b"A")
+                    .timestamp(timestamps.0)
+                    .wait(),
+            };
+            // Latest dispatches its original reply synchronously from this native FINAL.
+            drop(producer);
+            (prefix, reply)
+        });
+        let entry_receipt = tokio::time::timeout(Duration::from_secs(1), entry).await;
+        match reply_kind {
+            ActiveReplyKind::Latest => {}
+            ActiveReplyKind::Error
+            | ActiveReplyKind::Unconsolidated
+            | ActiveReplyKind::MonotonicFirst
+            | ActiveReplyKind::MonotonicNewer => {
+                session.downgrade().send_response_final(&mut final_reply);
+            }
+        }
+        let timeout = session.0.query_timeout_tasks.lock().unwrap().pop().unwrap();
+        if let ActiveReplyKind::Latest = reply_kind {
+            // The original QueryState's cancellation guard is still held during callback.
+            timeout.abort();
+        }
+        let timeout_receipt = timeout.await;
+        let retired_inventory = (
+            zwrite!(session.0.state).queries.len(),
+            capacity.available_permits(),
+            original_marker.strong_count(),
+        );
+        let blocked = session
+            .get(key_expr)
+            .allowed_destination(Locality::SessionLocal)
+            .payload(*b"B")
+            .await;
+        let blocked_query = queryable.try_recv();
+        let blocked_payload = blocked_query.as_ref().ok().and_then(|query| {
+            query
+                .as_ref()
+                .and_then(|query| query.payload().map(|bytes| bytes.to_bytes().into_owned()))
+        });
+        let blocked_reply = blocked_query.as_ref().ok().and_then(|query| {
+            query
+                .as_ref()
+                .map(|query| query.reply(key_expr, *b"B").wait())
+        });
+        drop(blocked_query);
+        let release_receipt = release.send(());
+        let producer_receipt = reply_producer.join();
+        let retired_marker = original_marker.strong_count();
+        let pending_timeouts = mem::take(&mut *session.0.query_timeout_tasks.lock().unwrap());
+        let mut pending_receipts = Vec::new();
+        for timeout in pending_timeouts {
+            pending_receipts.push(timeout.await);
+        }
+        let reusable_capacity = capacity.available_permits();
+        let fresh = session
+            .get(key_expr)
+            .allowed_destination(Locality::SessionLocal)
+            .payload(*b"C")
+            .await;
+        let fresh_query = queryable.try_recv();
+        let fresh_id = fresh_query
+            .as_ref()
+            .ok()
+            .and_then(|query| query.as_ref().map(|query| query.inner.qid));
+        let fresh_payload = fresh_query.as_ref().ok().and_then(|query| {
+            query
+                .as_ref()
+                .and_then(|query| query.payload().map(|bytes| bytes.to_bytes().into_owned()))
+        });
+        let fresh_reply = fresh_query.as_ref().ok().and_then(|query| {
+            query
+                .as_ref()
+                .map(|query| query.reply(key_expr, *b"C").wait())
+        });
+        drop(fresh_query);
+        let declaration_retirement = queryable.undeclare().await;
+        let session_retirement = session.close().await;
+        let remaining_timeouts = mem::take(&mut *session.0.query_timeout_tasks.lock().unwrap());
+        let mut remaining_receipts = Vec::new();
+        for timeout in remaining_timeouts {
+            remaining_receipts.push(timeout.await);
+        }
+        let fresh_delivery = fresh.as_ref().ok().map(|receiver| receiver.try_recv());
+        assert!(declaration_retirement.is_ok());
+        assert!(session_retirement.is_ok());
+        match reply_kind {
+            ActiveReplyKind::Latest => {
+                assert!(matches!(&timeout_receipt, Err(cause) if cause.is_cancelled()))
+            }
+            ActiveReplyKind::Error
+            | ActiveReplyKind::Unconsolidated
+            | ActiveReplyKind::MonotonicFirst
+            | ActiveReplyKind::MonotonicNewer => assert!(timeout_receipt.is_ok()),
+        }
+        assert!(pending_receipts.iter().all(Result::is_ok));
+        assert!(remaining_receipts.iter().all(Result::is_ok));
+        assert!(matches!(&producer_receipt, Ok((_, Ok(())))));
+        assert!(matches!(&entry_receipt, Ok(Ok(_))));
+        assert!(release_receipt.is_ok());
+        assert!(initial.is_ok());
+        let original_reply = entry_receipt
+            .as_ref()
+            .ok()
+            .and_then(|receipt| receipt.as_ref().ok());
+        let original_payload = original_reply.map(|reply| match (reply_kind, reply.result()) {
+            (ActiveReplyKind::Error, Err(cause)) => cause.payload().to_bytes().into_owned(),
+            (
+                ActiveReplyKind::Unconsolidated
+                | ActiveReplyKind::MonotonicFirst
+                | ActiveReplyKind::MonotonicNewer
+                | ActiveReplyKind::Latest,
+                Ok(sample),
+            ) => {
+                let expected_timestamp = match reply_kind {
+                    ActiveReplyKind::MonotonicNewer => timestamps.1,
+                    ActiveReplyKind::Error
+                    | ActiveReplyKind::Unconsolidated
+                    | ActiveReplyKind::MonotonicFirst
+                    | ActiveReplyKind::Latest => timestamps.0,
+                };
+                assert_eq!(sample.timestamp(), Some(&expected_timestamp));
+                sample.payload().to_bytes().into_owned()
+            }
+            (ActiveReplyKind::Error, Ok(_))
+            | (
+                ActiveReplyKind::Unconsolidated
+                | ActiveReplyKind::MonotonicFirst
+                | ActiveReplyKind::MonotonicNewer
+                | ActiveReplyKind::Latest,
+                Err(_),
+            ) => panic!("the actual reply kind differs from the native producer"),
+        });
+        let prefix_originals = prefix_replies.lock().unwrap();
+        let prefix_send = producer_receipt
+            .as_ref()
+            .ok()
+            .and_then(|(prefix, _)| prefix.as_ref());
+        match reply_kind {
+            ActiveReplyKind::MonotonicNewer => {
+                assert!(matches!(prefix_send, Some(Ok(()))));
+                assert_eq!(prefix_originals.len(), 1);
+                let prefix = prefix_originals[0]
+                    .result()
+                    .expect("native prefix is a sample");
+                assert_eq!(prefix.payload().to_bytes().as_ref(), b"P");
+                assert_eq!(prefix.timestamp(), Some(&timestamps.0));
+                assert!(timestamps.0 < timestamps.1);
+            }
+            ActiveReplyKind::Error
+            | ActiveReplyKind::Unconsolidated
+            | ActiveReplyKind::MonotonicFirst
+            | ActiveReplyKind::Latest => {
+                assert!(prefix_send.is_none());
+                assert!(prefix_originals.is_empty());
+            }
+        }
+        assert_eq!(original_payload.as_deref(), Some(&b"A"[..]));
+        assert!(
+            matches!(
+                blocked
+                    .as_ref()
+                    .err()
+                    .and_then(|cause| cause.downcast_ref::<TryAcquireError>()),
+                Some(TryAcquireError::NoPermits)
+            ),
+            "an active native reply callback must keep its registration reserved"
+        );
+        assert_eq!(retired_inventory, (0, 0, 1));
+        assert_eq!(retired_marker, 0);
+        assert_eq!(reusable_capacity, 1);
+        assert!(blocked_payload.is_none());
+        assert!(blocked_reply.is_none());
+        assert_eq!(actual_payload.as_deref(), Some(&b"A"[..]));
+        let callback_originals = callback_receipts.lock().unwrap();
+        assert!(matches!(
+            callback_originals.as_ref(),
+            Some((Some(Ok(())), Some(Ok(()))))
+        ));
+        assert!(fresh.is_ok());
+        assert!(fresh_id.is_some());
+        assert_ne!(fresh_id, Some(actual_id));
+        assert_eq!(fresh_payload.as_deref(), Some(&b"C"[..]));
+        assert!(matches!(&fresh_reply, Some(Ok(()))));
+        let delivered = fresh_delivery
+            .as_ref()
+            .and_then(|delivery| delivery.as_ref().ok())
+            .and_then(Option::as_ref);
+        let delivered_payload = delivered
+            .and_then(|reply| reply.result().ok())
+            .map(|sample| sample.payload().to_bytes().into_owned());
+        assert_eq!(delivered_payload.as_deref(), Some(&b"C"[..]));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn closed_query_capacity_preserves_native_refusal_precedence() {
+        let mut config = Config::default();
+        config.scouting.multicast.set_enabled(Some(false)).unwrap();
+        config.scouting.gossip.set_enabled(Some(false)).unwrap();
+        config.listen.endpoints.set(Vec::new()).unwrap();
+        config.connect.endpoints.set(Vec::new()).unwrap();
+        config
+            .set_queries_max_retained(NonZeroUsize::new(1))
+            .unwrap();
+        let session = crate::open(config).await.unwrap();
+        let capacity = session.0.query_capacity.as_ref().unwrap().clone();
+        capacity.close();
+        zwrite!(session.0.state)
+            .qid_counter
+            .store(RequestId::MAX, Ordering::SeqCst);
+        let quota_refusal = session
+            .get("query/capacity/closed-quota")
+            .allowed_destination(Locality::SessionLocal)
+            .await;
+        let pending_queries = zwrite!(session.0.state).queries.len();
+        let timeout_tasks = mem::take(&mut *session.0.query_timeout_tasks.lock().unwrap());
+        let spawned_tasks = timeout_tasks.len();
+        let mut timeout_receipts = Vec::new();
+        for task in timeout_tasks {
+            timeout_receipts.push(task.await);
+        }
+        let session_close = session.close().await;
+        let session_refusal = session
+            .get("query/capacity/closed-session")
+            .allowed_destination(Locality::SessionLocal)
+            .await;
+        assert!(session_close.is_ok());
+        assert!(timeout_receipts.iter().all(Result::is_ok));
+        assert!(
+            matches!(
+                quota_refusal
+                    .as_ref()
+                    .err()
+                    .and_then(|cause| cause.downcast_ref::<TryAcquireError>()),
+                Some(TryAcquireError::Closed)
+            ),
+            "closed quota precedes exhausted query identifiers"
+        );
+        assert!(
+            matches!(
+                session_refusal
+                    .as_ref()
+                    .err()
+                    .and_then(|cause| cause.downcast_ref::<SessionClosedError>()),
+                Some(SessionClosedError)
+            ),
+            "closed Session precedes closed quota"
+        );
+        assert_eq!(pending_queries, 0);
+        assert_eq!(spawned_tasks, 0);
+    }
+
+    #[test]
+    fn oversized_direct_config_refuses_before_runtime_construction() {
+        let oversized = Semaphore::MAX_PERMITS + 1;
+        let config: Config =
+            serde_json::from_str(&format!("{{\"queries_max_retained\":{oversized}}}")).unwrap();
+        let original_thread = thread::current().id();
+        let before = RUNTIME_CONSTRUCTION_ENTRIES.with(|entries| entries.get());
+        let refused = crate::open(config).wait();
+        let after_refusal = RUNTIME_CONSTRUCTION_ENTRIES.with(|entries| entries.get());
+        let mut valid = Config::default();
+        valid.scouting.multicast.set_enabled(Some(false)).unwrap();
+        valid.scouting.gossip.set_enabled(Some(false)).unwrap();
+        valid.listen.endpoints.set(Vec::new()).unwrap();
+        valid.connect.endpoints.set(Vec::new()).unwrap();
+        valid
+            .set_queries_max_retained(NonZeroUsize::new(1))
+            .unwrap();
+        let accepted = crate::open(valid).wait();
+        let after_acceptance = RUNTIME_CONSTRUCTION_ENTRIES.with(|entries| entries.get());
+        let retired = accepted.as_ref().ok().map(|session| session.close().wait());
+        let completed_thread = thread::current().id();
+        assert_eq!(original_thread, completed_thread);
+        assert_eq!(
+            after_refusal, before,
+            "oversized direct Serde input must not enter RuntimeBuilder::new"
+        );
+        assert!(refused.is_err());
+        assert!(accepted.is_ok());
+        assert_eq!(after_acceptance, before + 1);
+        assert!(matches!(retired, Some(Ok(()))));
+    }
+
+    #[test]
+    fn invalid_advanced_init_preserves_its_original_runtime() {
+        let mut config = Config::default();
+        config.scouting.multicast.set_enabled(Some(false)).unwrap();
+        config.scouting.gossip.set_enabled(Some(false)).unwrap();
+        config.listen.endpoints.set(Vec::new()).unwrap();
+        config.connect.endpoints.set(Vec::new()).unwrap();
+        let session = crate::open(config).wait().unwrap();
+        let runtime = session.runtime().static_runtime().unwrap().clone();
+        let id_before = runtime.next_id();
+        let oversized = Semaphore::MAX_PERMITS + 1;
+        let invalid: Config =
+            serde_json::from_str(&format!("{{\"queries_max_retained\":{oversized}}}")).unwrap();
+        let configured_original = mem::replace(&mut *runtime.config().lock(), invalid.expanded());
+        let refused = Session::init(runtime.clone().into(), Vec::new(), Vec::new()).wait();
+        let invalid_original = mem::replace(&mut *runtime.config().lock(), configured_original);
+        let id_after = runtime.next_id();
+        let continued = session
+            .declare_queryable("query/capacity/runtime-survivor")
+            .wait()
+            .map(|queryable| queryable.undeclare().wait());
+        let closed = session.close().wait();
+        assert!(closed.is_ok());
+        assert!(refused.is_err());
+        assert_eq!(
+            invalid_original
+                .queries_max_retained()
+                .map(NonZeroUsize::get),
+            Some(oversized)
+        );
+        assert_eq!(
+            id_after,
+            id_before + 1,
+            "refused init does not issue a new Session identity"
+        );
+        assert!(matches!(continued, Ok(Ok(()))));
     }
 }

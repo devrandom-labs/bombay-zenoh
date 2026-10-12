@@ -27,7 +27,10 @@ use rustls::{
     version::TLS13,
     ClientConfig, RootCertStore, ServerConfig,
 };
-use rustls_pki_types::ServerName;
+use rustls_pki_types::{
+    pem::{self, ReadIter},
+    PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer, ServerName,
+};
 use secrecy::ExposeSecret;
 use webpki::anchor_from_trusted_cert;
 use zenoh_config::Config as ZenohConfig;
@@ -202,29 +205,12 @@ impl<'a> TlsServerConfig<'a> {
         let tls_server_certificate = TlsServerConfig::load_tls_certificate(config).await?;
 
         let certs: Vec<CertificateDer> =
-            rustls_pemfile::certs(&mut Cursor::new(&tls_server_certificate))
+            ReadIter::<_, CertificateDer<'static>>::new(&mut Cursor::new(&tls_server_certificate))
                 .collect::<Result<_, _>>()
-                .map_err(|err| zerror!("Error processing server certificate: {err}."))?;
+                .map_err(|err| zerror!(err => "Error processing server certificate"))?;
 
-        let mut keys: Vec<PrivateKeyDer> =
-            rustls_pemfile::rsa_private_keys(&mut Cursor::new(&tls_server_private_key))
-                .map(|x| x.map(PrivateKeyDer::from))
-                .collect::<Result<_, _>>()
-                .map_err(|err| zerror!("Error processing server key: {err}."))?;
-
-        if keys.is_empty() {
-            keys = rustls_pemfile::pkcs8_private_keys(&mut Cursor::new(&tls_server_private_key))
-                .map(|x| x.map(PrivateKeyDer::from))
-                .collect::<Result<_, _>>()
-                .map_err(|err| zerror!("Error processing server key: {err}."))?;
-        }
-
-        if keys.is_empty() {
-            keys = rustls_pemfile::ec_private_keys(&mut Cursor::new(&tls_server_private_key))
-                .map(|x| x.map(PrivateKeyDer::from))
-                .collect::<Result<_, _>>()
-                .map_err(|err| zerror!("Error processing server key: {err}."))?;
-        }
+        let mut keys = preferred_private_keys(&tls_server_private_key)
+            .map_err(|err| zerror!(err => "Error processing server key"))?;
 
         if keys.is_empty() {
             bail!("No private key found for TLS server.");
@@ -368,31 +354,14 @@ impl<'a> TlsClientConfig<'a> {
             let tls_client_private_key = TlsClientConfig::load_tls_private_key(config).await?;
             let tls_client_certificate = TlsClientConfig::load_tls_certificate(config).await?;
 
-            let certs: Vec<CertificateDer> =
-                rustls_pemfile::certs(&mut Cursor::new(&tls_client_certificate))
-                    .collect::<Result<_, _>>()
-                    .map_err(|err| zerror!("Error processing client certificate: {err}."))?;
+            let certs: Vec<CertificateDer> = ReadIter::<_, CertificateDer<'static>>::new(
+                &mut Cursor::new(&tls_client_certificate),
+            )
+            .collect::<Result<_, _>>()
+            .map_err(|err| zerror!(err => "Error processing client certificate"))?;
 
-            let mut keys: Vec<PrivateKeyDer> =
-                rustls_pemfile::rsa_private_keys(&mut Cursor::new(&tls_client_private_key))
-                    .map(|x| x.map(PrivateKeyDer::from))
-                    .collect::<Result<_, _>>()
-                    .map_err(|err| zerror!("Error processing client key: {err}."))?;
-
-            if keys.is_empty() {
-                keys =
-                    rustls_pemfile::pkcs8_private_keys(&mut Cursor::new(&tls_client_private_key))
-                        .map(|x| x.map(PrivateKeyDer::from))
-                        .collect::<Result<_, _>>()
-                        .map_err(|err| zerror!("Error processing client key: {err}."))?;
-            }
-
-            if keys.is_empty() {
-                keys = rustls_pemfile::ec_private_keys(&mut Cursor::new(&tls_client_private_key))
-                    .map(|x| x.map(PrivateKeyDer::from))
-                    .collect::<Result<_, _>>()
-                    .map_err(|err| zerror!("Error processing client key: {err}."))?;
-            }
+            let mut keys = preferred_private_keys(&tls_client_private_key)
+                .map_err(|err| zerror!(err => "Error processing client key"))?;
 
             if keys.is_empty() {
                 bail!("No private key found for TLS client.");
@@ -482,9 +451,26 @@ impl<'a> TlsClientConfig<'a> {
     }
 }
 
+fn preferred_private_keys(pem: &[u8]) -> Result<Vec<PrivateKeyDer<'static>>, pem::Error> {
+    let mut keys = ReadIter::<_, PrivatePkcs1KeyDer<'static>>::new(&mut Cursor::new(pem))
+        .map(|key| key.map(PrivateKeyDer::from))
+        .collect::<Result<Vec<_>, _>>()?;
+    if keys.is_empty() {
+        keys = ReadIter::<_, PrivatePkcs8KeyDer<'static>>::new(&mut Cursor::new(pem))
+            .map(|key| key.map(PrivateKeyDer::from))
+            .collect::<Result<_, _>>()?;
+    }
+    if keys.is_empty() {
+        keys = ReadIter::<_, PrivateSec1KeyDer<'static>>::new(&mut Cursor::new(pem))
+            .map(|key| key.map(PrivateKeyDer::from))
+            .collect::<Result<_, _>>()?;
+    }
+    Ok(keys)
+}
+
 fn process_pem(pem: &mut dyn io::BufRead) -> ZResult<Vec<TrustAnchor<'static>>> {
-    let certs: Vec<CertificateDer> = rustls_pemfile::certs(pem)
-        .map(|result| result.map_err(|err| zerror!("Error processing PEM certificates: {err}.")))
+    let certs: Vec<CertificateDer> = ReadIter::<_, CertificateDer<'static>>::new(pem)
+        .map(|result| result.map_err(|err| zerror!(err => "Error processing PEM certificates")))
         .collect::<Result<Vec<CertificateDer>, ZError>>()?;
 
     let trust_anchors: Vec<TrustAnchor> = certs
@@ -642,7 +628,7 @@ mod outgoing_tls_trust_tests {
     const EMPTY_OUTGOING_TRUST: &str = "No root CA certificates loaded: 'use_public_pki' is disabled and no root CA certificate was configured";
     // Existing public minica CA fixture from the owning transport tests.
     // Embedded so these tests remain inside the published TLS package.
-    const DEPLOYMENT_CA: &str = "-----BEGIN CERTIFICATE-----
+    pub(super) const DEPLOYMENT_CA: &str = "-----BEGIN CERTIFICATE-----
 MIIDSzCCAjOgAwIBAgIIB42n1ZIkOakwDQYJKoZIhvcNAQELBQAwIDEeMBwGA1UE
 AxMVbWluaWNhIHJvb3QgY2EgMDc4ZGE3MCAXDTIzMDMwNjE2MDMwN1oYDzIxMjMw
 MzA2MTYwMzA3WjAgMR4wHAYDVQQDExVtaW5pY2Egcm9vdCBjYSAwNzhkYTcwggEi
@@ -766,5 +752,295 @@ R+IdLiXcyIkg0m9N8I17p0ljCSkbrgGMD3bbePRTfg==
         assert_eq!(configuration.get("use_public_pki"), Some("false"));
         let refusal = outgoing_trust_anchors(&configuration).unwrap_err();
         assert!(refusal.to_string().contains(EMPTY_OUTGOING_TRUST));
+    }
+}
+
+#[cfg(test)]
+mod tls_pem_tests {
+    use std::{
+        io::{self, BufReader, Cursor, Read},
+        ptr,
+    };
+
+    use base64::{engine::general_purpose, Engine};
+    use rustls_pki_types::{
+        pem::{self, ReadIter},
+        CertificateDer, PrivateKeyDer,
+        PrivateKeyDer::{Pkcs1, Pkcs8, Sec1},
+        TrustAnchor,
+    };
+    use zenoh_protocol::core::EndPoint;
+
+    use super::{
+        outgoing_tls_trust_tests::DEPLOYMENT_CA, preferred_private_keys, process_pem,
+        TlsClientConfig, TlsServerConfig,
+    };
+
+    const RSA: &str = "-----BEGIN RSA PRIVATE KEY-----\nAQID\n-----END RSA PRIVATE KEY-----\n";
+    const RSA_SECOND: &str =
+        "-----BEGIN RSA PRIVATE KEY-----\nBAUG\n-----END RSA PRIVATE KEY-----\n";
+    const PKCS8: &str = "-----BEGIN PRIVATE KEY-----\nBwgJ\n-----END PRIVATE KEY-----\n";
+    const SEC1: &str = "-----BEGIN EC PRIVATE KEY-----\nCgsM\n-----END EC PRIVATE KEY-----\n";
+    const CERTIFICATE: &str = "-----BEGIN CERTIFICATE-----\nDQ4P\n-----END CERTIFICATE-----\n";
+    const CERTIFICATE_NEXT: &str = "-----BEGIN CERTIFICATE-----\nEBES\n-----END CERTIFICATE-----\n";
+    const UNKNOWN: &str = "-----BEGIN UNKNOWN-----\nnot-base64!\n-----END UNKNOWN-----\n";
+    const MALFORMED: &str = "-----BEGIN CERTIFICATE-----\n!\n-----END CERTIFICATE-----\n";
+    const MATCHING_KEY: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgK7z8MHmX75qSSGh9
+4wpqRXA0d3Bsb5tFp9kqHmmCYwuhRANCAAQhiWwnr2iHk/bV86RMYfuntz4o+gPH
+ayFAA6DbVZnxvNz4MxY889I7HSrD5iqtO8iaxlQeavx9F1Ff73agYgBj
+-----END PRIVATE KEY-----";
+    const MATCHING_CERTIFICATE: &str = "-----BEGIN CERTIFICATE-----
+MIICEjCCAbigAwIBAgIUK+gTxmEapjy9K2AOKy+FaWkjACkwCgYIKoZIzj0EAwMw
+RTELMAkGA1UEBhMCQVUxEzARBgNVBAgMClNvbWUtU3RhdGUxITAfBgNVBAoMGElu
+dGVybmV0IFdpZGdpdHMgUHR5IEx0ZDAgFw0yNjAyMDUxMjQ5MTNaGA8zMDI1MDYw
+ODEyNDkxM1owRTELMAkGA1UEBhMCQVUxEzARBgNVBAgMClNvbWUtU3RhdGUxITAf
+BgNVBAoMGEludGVybmV0IFdpZGdpdHMgUHR5IEx0ZDBZMBMGByqGSM49AgEGCCqG
+SM49AwEHA0IABCGJbCevaIeT9tXzpExh+6e3Pij6A8drIUADoNtVmfG83PgzFjzz
+0jsdKsPmKq07yJrGVB5q/H0XUV/vdqBiAGOjgYMwgYAwHQYDVR0OBBYEFITqkHg7
+V7s6YEFEjayZ1x0nZ7yVMB8GA1UdIwQYMBaAFC1uOxD1e2c3O9JWFJpbYrk+VQ99
+MAkGA1UdEwQCMAAwFAYDVR0RBA0wC4IJbG9jYWxob3N0MB0GA1UdJQQWMBQGCCsG
+AQUFBwMBBggrBgEFBQcDAjAKBggqhkjOPQQDAwNIADBFAiARmqtIYRygkWrMZg6j
+kYikJVUysUelvUMRfljBCbB1jgIhALzl57XtBhJ+QVy5jNMKjU6s9yfCvnzZPTpk
+3Z0eRdp3
+-----END CERTIFICATE-----";
+
+    #[test]
+    fn process_pem_preserves_complete_ordered_trust_anchors() {
+        // Literal ASN.1 field contents independently extracted with OpenSSL from these fixtures.
+        let expected = vec![
+            TrustAnchor {
+                subject: general_purpose::STANDARD.decode("MR4wHAYDVQQDExVtaW5pY2Egcm9vdCBjYSAwNzhkYTc=").unwrap().into(),
+                subject_public_key_info: general_purpose::STANDARD.decode("MA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDIuCq24O4P4Aep5vAVlrIQ7P8+uWWgcHIFYa02TmhBUB/hjo0JANCQvAtpVNuQ8NyKPlqnnq1cttePbSYVeA0rrnOsDcfySAiyGBEY9zMjFfHJtH1wtrPcJEU8XIEY3xUlrAJE2CEuV9dVYgfEEydnvgLc8Ug0WXSiARjqbnMW3l8jh6bYCp/UpL/gSM4mxdKrgpfyPoweGhlOWXc3RTS7cqM9T25acURGOSI6/g8GF0sNE4VZmUvHggSTmsbLeXMJzxDWO+xVehRmbQx3IkG7u++bQdRwGIJcDNn7zHlDMHtQ0Z1DBV94fZNBwCULhCBB5g20XTGw//S7Fj2FPwyhAgMBAAE=").unwrap().into(),
+                name_constraints: None,
+            },
+            TrustAnchor {
+                subject: general_purpose::STANDARD.decode("MQswCQYDVQQGEwJBVTETMBEGA1UECAwKU29tZS1TdGF0ZTEhMB8GA1UECgwYSW50ZXJuZXQgV2lkZ2l0cyBQdHkgTHRk").unwrap().into(),
+                subject_public_key_info: general_purpose::STANDARD.decode("MBMGByqGSM49AgEGCCqGSM49AwEHA0IABCGJbCevaIeT9tXzpExh+6e3Pij6A8drIUADoNtVmfG83PgzFjzz0jsdKsPmKq07yJrGVB5q/H0XUV/vdqBiAGM=").unwrap().into(),
+                name_constraints: None,
+            },
+        ];
+        let input = format!("{DEPLOYMENT_CA}\n{MATCHING_CERTIFICATE}\n");
+        let actual = process_pem(&mut Cursor::new(input)).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn process_pem_refuses_malformed_tail_after_complete_anchors() {
+        let input = format!("{DEPLOYMENT_CA}\n{MATCHING_CERTIFICATE}\n{MALFORMED}");
+        let refusal = process_pem(&mut Cursor::new(input)).unwrap_err();
+        let cause = refusal
+            .source()
+            .unwrap()
+            .downcast_ref::<pem::Error>()
+            .unwrap();
+        let pem::Error::Base64Decode(reason) = cause else {
+            panic!("wrong native PEM cause: {cause}")
+        };
+        assert_eq!(reason, "InvalidCharacter(33)");
+    }
+
+    #[test]
+    fn preferred_private_keys_preserves_complete_preferred_der() {
+        for sections in [
+            [RSA, PKCS8, SEC1],
+            [RSA, SEC1, PKCS8],
+            [PKCS8, RSA, SEC1],
+            [PKCS8, SEC1, RSA],
+            [SEC1, RSA, PKCS8],
+            [SEC1, PKCS8, RSA],
+        ] {
+            let actual = preferred_private_keys(sections.concat().as_bytes()).unwrap();
+            let expected = vec![Pkcs1(vec![1, 2, 3].into())];
+            assert_eq!(actual, expected);
+        }
+        for (sections, expected) in [
+            (vec![RSA], vec![Pkcs1(vec![1, 2, 3].into())]),
+            (vec![PKCS8], vec![Pkcs8(vec![7, 8, 9].into())]),
+            (
+                vec![PKCS8, PKCS8],
+                vec![Pkcs8(vec![7, 8, 9].into()), Pkcs8(vec![7, 8, 9].into())],
+            ),
+            (vec![SEC1], vec![Sec1(vec![10, 11, 12].into())]),
+            (
+                vec![SEC1, SEC1],
+                vec![Sec1(vec![10, 11, 12].into()), Sec1(vec![10, 11, 12].into())],
+            ),
+            (vec![PKCS8, SEC1], vec![Pkcs8(vec![7, 8, 9].into())]),
+            (vec![SEC1, PKCS8], vec![Pkcs8(vec![7, 8, 9].into())]),
+            (
+                vec![RSA_SECOND, SEC1, RSA],
+                vec![Pkcs1(vec![4, 5, 6].into()), Pkcs1(vec![1, 2, 3].into())],
+            ),
+            (
+                vec![UNKNOWN, CERTIFICATE, PKCS8],
+                vec![Pkcs8(vec![7, 8, 9].into())],
+            ),
+        ] {
+            let actual = preferred_private_keys(sections.concat().as_bytes()).unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn preferred_private_keys_refuses_malformed_sections_after_a_key() {
+        for malformed in [MALFORMED, "-----BEGIN PRIVATE KEY----\n"] {
+            for sections in [
+                [malformed, RSA],
+                [RSA, malformed],
+                [PKCS8, malformed],
+                [SEC1, malformed],
+            ] {
+                let actual = preferred_private_keys(sections.concat().as_bytes());
+                assert!(actual.is_err(), "malformed recognized section was ignored");
+            }
+        }
+        let actual = preferred_private_keys(b"-----BEGIN PRIVATE KEY-----\nAQID");
+        assert!(actual.is_err(), "missing final footer was ignored");
+        let input = ["-----BEGIN PRIVATE KEY-----\nAQID\n", RSA].concat();
+        let actual = preferred_private_keys(input.as_bytes()).unwrap();
+        assert_eq!(actual, vec![Pkcs1(vec![1, 2, 3, 1, 2, 3].into())]);
+        for input in ["", "unrelated text", CERTIFICATE, UNKNOWN] {
+            let actual = preferred_private_keys(input.as_bytes()).unwrap();
+            assert_eq!(actual, Vec::<PrivateKeyDer>::new());
+        }
+        let actual = preferred_private_keys(b"-----BEGIN UNKNOWN-----\n!");
+        assert!(actual.is_err());
+    }
+
+    #[test]
+    fn typed_certificate_reader_preserves_complete_der() {
+        let input = [CERTIFICATE, PKCS8, CERTIFICATE_NEXT, UNKNOWN].concat();
+        let actual =
+            ReadIter::<_, CertificateDer<'static>>::new(&mut Cursor::new(input.as_bytes()))
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+        let expected = vec![
+            CertificateDer::from(vec![13, 14, 15]),
+            CertificateDer::from(vec![16, 17, 18]),
+        ];
+        assert_eq!(actual, expected);
+        let input = [CERTIFICATE, MALFORMED].concat();
+        let actual =
+            ReadIter::<_, CertificateDer<'static>>::new(&mut Cursor::new(input.as_bytes()))
+                .collect::<Result<Vec<_>, _>>();
+        assert!(actual.is_err());
+    }
+
+    #[tokio::test]
+    async fn tls_constructors_preserve_key_selection_and_refusal_precedence() {
+        for (key, certificate, refusals) in [
+            (MATCHING_KEY.to_owned(), MATCHING_CERTIFICATE, None),
+            (
+                String::new(),
+                MATCHING_CERTIFICATE,
+                Some([
+                    "No private key found for TLS server.",
+                    "No private key found for TLS client.",
+                ]),
+            ),
+            (
+                MALFORMED.to_owned(),
+                MALFORMED,
+                Some([
+                    "Error processing server certificate",
+                    "Error processing client certificate",
+                ]),
+            ),
+            (
+                format!("{MATCHING_KEY}\n{MALFORMED}"),
+                MATCHING_CERTIFICATE,
+                Some(["Error processing server key", "Error processing client key"]),
+            ),
+            (
+                format!("{MATCHING_KEY}\n{RSA}"),
+                MATCHING_CERTIFICATE,
+                Some(["private key", "Bad certificate/key"]),
+            ),
+        ] {
+            let selection = format!("enable_mtls=true;use_public_pki=false;root_ca_certificate_raw={MATCHING_CERTIFICATE};listen_private_key_raw={key};listen_certificate_raw={certificate};connect_private_key_raw={key};connect_certificate_raw={certificate}");
+            let endpoint = EndPoint::new("tls", "localhost:7447", "", &selection).unwrap();
+            let configuration = endpoint.config();
+            let server = TlsServerConfig::new(&configuration).await;
+            let client = TlsClientConfig::new(&configuration).await;
+            let outcomes = [server.map(drop), client.map(drop)];
+            match refusals {
+                None => {
+                    for outcome in outcomes {
+                        assert!(outcome.is_ok());
+                    }
+                }
+                Some(expected) => {
+                    for (outcome, prefix) in outcomes.into_iter().zip(expected) {
+                        let refusal =
+                            outcome.expect_err("TLS constructor changed its key/refusal selection");
+                        assert!(refusal.to_string().contains(prefix), "{refusal}");
+                    }
+                }
+            }
+        }
+        let selection = format!("enable_mtls=true;use_public_pki=false;root_ca_certificate_raw=;connect_private_key_raw={MALFORMED};connect_certificate_raw={MALFORMED}");
+        let endpoint = EndPoint::new("tls", "localhost:7447", "", &selection).unwrap();
+        let configuration = endpoint.config();
+        let actual = TlsClientConfig::new(&configuration).await;
+        let refusal = match actual {
+            Err(refusal) => refusal,
+            Ok(_) => panic!("empty private roots accepted"),
+        };
+        assert!(refusal
+            .to_string()
+            .contains("No root CA certificates loaded:"));
+    }
+
+    #[test]
+    fn preferred_private_keys_preserves_native_parser_failures() {
+        let missing = preferred_private_keys(b"-----BEGIN PRIVATE KEY-----\nAQID").unwrap_err();
+        let pem::Error::MissingSectionEnd { end_marker } = missing else {
+            panic!("wrong missing-footer cause: {missing}")
+        };
+        assert_eq!(end_marker, b"PRIVATE KEY");
+        let illegal = preferred_private_keys(b"-----BEGIN PRIVATE KEY----").unwrap_err();
+        let pem::Error::IllegalSectionStart { line } = illegal else {
+            panic!("wrong malformed-BEGIN cause: {illegal}")
+        };
+        assert_eq!(line, b"-----BEGIN PRIVATE KEY----");
+        let invalid = preferred_private_keys(MALFORMED.as_bytes()).unwrap_err();
+        let pem::Error::Base64Decode(reason) = invalid else {
+            panic!("wrong base64 cause: {invalid}")
+        };
+        assert_eq!(reason, "InvalidCharacter(33)");
+    }
+
+    struct CertificateReaderFailure(Option<io::Error>);
+    impl Read for CertificateReaderFailure {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(self.0.take().expect("reader fault was consumed twice"))
+        }
+    }
+    #[test]
+    fn process_pem_preserves_original_failures() {
+        let marker = Box::new(io::Error::other("original certificate read failure"));
+        let original: *const io::Error = marker.as_ref();
+        let failure = io::Error::new(io::ErrorKind::PermissionDenied, marker);
+        let mut reader = BufReader::new(CertificateReaderFailure(Some(failure)));
+        let refusal = process_pem(&mut reader).unwrap_err();
+        let source = refusal.source().expect("native PEM cause was erased");
+        let cause = source.downcast_ref::<pem::Error>().expect("PEM cause");
+        let pem::Error::Io(error) = cause else {
+            panic!("wrong reader cause: {cause}")
+        };
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let source = error.get_ref().expect("original reader failure was erased");
+        let marker = source.downcast_ref::<Box<io::Error>>().expect("I/O");
+        assert!(ptr::eq(original, marker.as_ref()));
+        assert_eq!(marker.to_string(), "original certificate read failure");
+        let mut reader = Cursor::new(b"-----BEGIN CERTIFICATE-----\nAQID");
+        let refusal = process_pem(&mut reader).unwrap_err();
+        let source = refusal.source().expect("native PEM cause was erased");
+        let cause = source.downcast_ref::<pem::Error>().expect("PEM cause");
+        let pem::Error::MissingSectionEnd { end_marker } = cause else {
+            panic!("wrong root certificate cause: {cause}")
+        };
+        assert_eq!(end_marker, b"CERTIFICATE");
     }
 }

@@ -26,9 +26,9 @@ prove repeated exhaustion cannot replace another query's consumer. The existing
 get error does not return its original payload. Router allocation and native
 timeout-task/resource bounds remain separate open requirements.
 
-The eight published dependency versions and archive checksums remain unchanged.
-Current verify/publish operations audit one new owning archive and those exact
-published dependencies; historical resume keeps its original source/transaction.
+The historical top-only successor operations retained all eight published
+dependency versions and archive checksums. They audited one new owning archive
+and those exact published dependencies; historical resume keeps its original source/transaction.
 Required review/CI, registry publication and a clean registry-only consumer must
 pass before claiming a successor delivered.
 
@@ -41,6 +41,26 @@ the actual packaged owning test outside the workspace with only default TLS,
 in both debug and optimized profiles. All eight support copies remain unchanged.
 Required review/CI, publication, actual registry archives and clean consumer
 verification passed for this release.
+
+Published `1.10.7` preserves routed query consumers at face identifier exhaustion;
+required CI, archive custody, actual publication and registry-only consumption
+have passed. Candidate `1.10.8` adds a local retained-query limit through the
+existing Config owner. Its exact six-candidate release is selected separately
+from historical top-only and initial-cohort operations: Config, TLS link, link,
+plugin trait and transport `1.10.2`, plus top `1.10.8`. Link commons `1.10.1`
+and both validated-struct `2.2.0` archives remain immutable. This candidate does
+not establish router-global, handshake, byte or executor-allocation bounds.
+No numeric default is selected. Publication remains unproved until its gates pass.
+
+The six candidates declare Rust `1.88.0`; their locked source and three consumer
+profiles pass with that exact compiler. Normalized archive and required Linux
+checks remain release gates. The three unchanged support archives retain their
+original manifests. Maintainers run both pinned profiles:
+
+```sh
+nix develop -c bash ci/verify-release.sh
+CARGO_TARGET_DIR="$PWD/target/compiler-floor" nix develop .#compiler-floor -c bash ci/compiler-floor.sh
+```
 
 This local source is based on upstream revision
 `1211779c3647f5a96713dade452c546a07823580` (1.10.1). The controlled package

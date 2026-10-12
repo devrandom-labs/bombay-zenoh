@@ -53,7 +53,7 @@ impl TransportUnicastUniversal {
                     (true, Some(priorities))
                         if prev_priorities
                             .as_ref()
-                            .map_or(true, |ps| ps.len() > priorities.len()) =>
+                            .is_none_or(|ps| ps.len() > priorities.len()) =>
                     {
                         match_.full = Some(i);
                         prev_priorities = Some(priorities);

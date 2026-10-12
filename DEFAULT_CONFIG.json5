@@ -230,6 +230,13 @@
   /// The default timeout to apply to queries in milliseconds.
   queries_default_timeout: 10000,
 
+  /// Optional nonzero bound on ordinary QueryState registrations retained by map state,
+  /// native timeout captures, or active native reply callbacks. FINAL/cancellation
+  /// signalling does not return capacity before those owners are destroyed.
+  /// At most Semaphore::MAX_PERMITS;
+  /// fixed at Session creation. Omission preserves unbounded compatibility.
+  // queries_max_retained: null,
+
   /// The routing strategy to use and its configuration.
   routing: {
     /// The routing strategy to use in routers and its configuration.

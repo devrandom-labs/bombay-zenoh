@@ -21,8 +21,8 @@ license = { workspace = true }
 license-file = { workspace = true }
 name = "bombay-zenoh-link"
 repository = { workspace = true }
-rust-version = { workspace = true }
-version = { workspace = true }
+rust-version = "1.88.0"
+version = "1.10.2"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]

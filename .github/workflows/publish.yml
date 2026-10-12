@@ -8,11 +8,18 @@ on:
         required: true
         type: string
       operation:
-        description: Verify packaging or publish the reviewed Zenoh successor
+        description: Verify packaging or publish the reviewed dependency successor
         required: true
         type: choice
         default: verify
         options: [verify, publish, resume]
+
+      release_kind:
+        description: Exact reviewed successor closure (resume retains its original cohort)
+        required: true
+        type: choice
+        default: configuration-successor
+        options: [configuration-successor, zenoh-successor]
 
 permissions:
   contents: read
@@ -50,6 +57,7 @@ jobs:
         env:
           EXPECTED_SOURCE_COMMIT: ${{ inputs.source_commit }}
           RELEASE_OPERATION: ${{ inputs.operation }}
+          RELEASE_KIND: ${{ inputs.release_kind }}
           GH_TOKEN: ${{ github.token }}
           BOMBAY_RELEASE_TOKEN: ${{ secrets.CARGO_REGISTRY_SECRET }}
       - name: Retain exact package artifacts

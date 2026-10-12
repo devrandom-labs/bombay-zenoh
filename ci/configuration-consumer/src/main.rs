@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use serde_json::Deserializer;
 use validated_struct::{GetError, InsertionError, ValidatedMap};
 use zenoh_config::{Config as ZenohConfig, GetError as ConfigGetError, ValidatedMap as ConfigMap};
@@ -32,10 +34,8 @@ fn main() {
     let endpoint =
         EndPoint::new("tls", "localhost:7447", "", "").expect("owning endpoint representation");
     let supported = LinkKind::try_from(&endpoint);
-    assert_eq!(
-        supported.expect("TLS is the selected transport"),
-        LinkKind::Tls
-    );
+    let supported = supported.expect("TLS is the selected transport");
+    assert_eq!(supported, LinkKind::Tls);
     for protocol in [
         "quic",
         "serial",
@@ -115,6 +115,16 @@ fn main() {
     assert_eq!(keys, ["directory", "tls", "tls/server"]);
 
     let mut config = ZenohConfig::default();
+    assert_eq!(config.queries_max_retained(), &None);
+    let retained = NonZeroUsize::new(1).expect("explicit retained-query capacity");
+    let previous: Result<Option<NonZeroUsize>, Option<NonZeroUsize>> =
+        config.set_queries_max_retained(Some(retained));
+    let previous = previous.expect("owning validated setter accepts capacity");
+    assert_eq!(previous, None);
+    assert_eq!(config.queries_max_retained(), &Some(retained));
+    let zero = config.insert_json5("queries_max_retained", "0");
+    let _zero_refusal = zero.expect_err("zero cannot erase the retained-query limit");
+    assert_eq!(config.queries_max_retained(), &Some(retained));
     let insertion: Result<(), InsertionError> =
         config.insert_json5("metadata", "{ configured: true }");
     insertion.expect("Zenoh configuration uses the corrected runtime error");
@@ -127,10 +137,8 @@ fn main() {
     assert!(matches!(missing, Err(ConfigGetError::NoMatchingKey)));
     let mut config: zenoh::Config = config.into();
     let metadata = config.get_json("metadata");
-    assert_eq!(
-        metadata.expect("top-level configuration retains owner identity"),
-        r#"{"configured":true}"#
-    );
+    let metadata = metadata.expect("top-level configuration retains owner identity");
+    assert_eq!(metadata, r#"{"configured":true}"#);
     let configured = config.insert_json5("transport/link/tls/use_public_pki", "false");
     configured.expect("top-level configuration supports the approved trust selection");
     let selection = config

@@ -12,7 +12,9 @@
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
 
-use std::{collections::HashMap, error::Error, fmt::Display};
+use std::{collections::HashMap, error::Error, fmt::Display, sync::Arc};
+
+use tokio::sync::OwnedSemaphorePermit;
 
 use serde::Deserialize;
 use tokio_util::sync::DropGuard;
@@ -247,6 +249,8 @@ pub(crate) struct QueryState {
     pub(crate) querier_id: Option<Id>,
     // Retiring the query requests retirement of its tracked timeout task.
     pub(crate) _timeout_cancellation: DropGuard,
+    // Return capacity only after this state's native resources have been dropped.
+    pub(crate) _retained_capacity: Option<Arc<OwnedSemaphorePermit>>,
 }
 /// The kinds of accepted query replies.
 ///
