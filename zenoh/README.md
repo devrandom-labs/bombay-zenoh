@@ -22,10 +22,10 @@ addresses with multicast and gossip discovery disabled. Enabling the transport
 feature alone does not configure those deployment requirements. Actor admission
 and identity policies belong to the Bombay integration.
 
-After verified registry publication, the selected dependency spelling is:
+The currently verified published dependency spelling is:
 
 ```toml
-zenoh = { package = "bombay-zenoh", version = "=1.10.3", default-features = false, features = ["transport_tls"] }
+zenoh = { package = "bombay-zenoh", version = "=1.10.6", default-features = false, features = ["transport_tls"] }
 ```
 
 Local package verification is a release rehearsal; it does not establish
@@ -36,9 +36,17 @@ The controlled source and package-release history belong to
 [devrandom-labs/bombay-zenoh](https://github.com/devrandom-labs/bombay-zenoh).
 
 Published `1.10.2` corrects resource registration for valid leading UTF-8 path
-chunks. The proposed `1.10.3` successor additionally retires finalized/disconnected
-native interest resources after their last owner releases them; live shared
-owners retain those resources. Its eight controlled dependencies stay published
-at their existing versions. Use `1.10.3` only after required review/CI and registry
-publication/consumption are verified; source preparation alone does not establish
-availability, global memory quotas or rollback after routing unwinds.
+chunks. Published `1.10.3` retires finalized/disconnected native interest resources
+after their last owner releases them; live shared owners retain those resources.
+Published `1.10.4` preserves accepted query consumers at session identifier
+exhaustion; `1.10.5` verifies that owning regression from the packaged source
+with default TLS alone. Published `1.10.6` retires completed query timeout owners.
+
+The proposed `1.10.7` additionally issues each routed query identifier at most
+once during its existing face lifetime. Exhaustion preserves earlier consumers
+and omits the exhausted route; BestMatching retains its first complete target
+without failover. Native query FINAL is stream completion, not protected actor
+refusal or proof of nonexecution. The eight controlled dependencies stay at their
+existing published versions. Use `1.10.7` only after required review/CI and registry
+publication/consumption are verified. These corrections do not establish global
+memory/task quotas, remote processing, router recovery or rollback after unwinds.

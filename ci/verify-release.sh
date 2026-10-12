@@ -50,6 +50,12 @@ for profile in debug release; do
   cargo test --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib \
     --no-default-features --features transport_tls,test \
     net::tests::regions::interest -- --test-threads=1
+  cargo test --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib \
+    --no-default-features --features transport_tls,test \
+    net::tests::regions::forwarding::routed_queries_keep_their_original_consumers_at_identifier_exhaustion -- --exact --nocapture
+  cargo test --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib \
+    --no-default-features --features transport_tls,test \
+    net::tests::regions::forwarding::routed_queries_issue_the_last_identifier_once_and_preserve_target_selection -- --exact --nocapture
   cargo clippy --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib --tests \
     --no-default-features --features transport_tls,test -- -D warnings
   cargo clippy --locked --jobs 2 "${build_arguments[@]}" \

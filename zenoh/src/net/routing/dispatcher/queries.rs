@@ -377,11 +377,11 @@ impl Face {
         match target {
             QueryTarget::All => {
                 for qabl in qabls.iter().filter(|q| filter(q)) {
-                    route.insert(qabl.dir.dst_face.id, || {
+                    route.try_insert(qabl.dir.dst_face.id, || {
                         let mut dir = qabl.dir.clone();
-                        let rid = insert_pending_query(&mut dir.dst_face, query.clone());
+                        let rid = insert_pending_query(&mut dir.dst_face, query.clone())?;
                         tracing::debug!(dst = %dir.dst_face, dst.target = "all");
-                        QueryDirection { dir, rid }
+                        Some(QueryDirection { dir, rid })
                     });
                 }
             }
@@ -390,11 +390,11 @@ impl Face {
                     .iter()
                     .filter(|q| q.info.is_none_or(|info| info.complete) && filter(q))
                 {
-                    route.insert(qabl.dir.dst_face.id, || {
+                    route.try_insert(qabl.dir.dst_face.id, || {
                         let mut dir = qabl.dir.clone();
-                        let rid = insert_pending_query(&mut dir.dst_face, query.clone());
+                        let rid = insert_pending_query(&mut dir.dst_face, query.clone())?;
                         tracing::debug!(dst = %dir.dst_face, dst.target = "all-complete");
-                        QueryDirection { dir, rid }
+                        Some(QueryDirection { dir, rid })
                     });
                 }
             }
@@ -403,11 +403,11 @@ impl Face {
                     .iter()
                     .find(|q| q.info.is_some_and(|info| info.complete) && filter(q))
                 {
-                    route.insert(qabl.dir.dst_face.id, || {
+                    route.try_insert(qabl.dir.dst_face.id, || {
                         let mut dir = qabl.dir.clone();
-                        let rid = insert_pending_query(&mut dir.dst_face, query.clone());
+                        let rid = insert_pending_query(&mut dir.dst_face, query.clone())?;
                         tracing::debug!(dst = %dir.dst_face, dst.target = "best-matching");
-                        QueryDirection { dir, rid }
+                        Some(QueryDirection { dir, rid })
                     });
                 } else {
                     self.compute_final_route(QueryTarget::All, route, query, qabls, filter)
@@ -418,19 +418,16 @@ impl Face {
 }
 
 #[inline]
-fn insert_pending_query(outface: &mut Arc<FaceState>, query: Arc<Query>) -> RequestId {
+fn insert_pending_query(outface: &mut Arc<FaceState>, query: Arc<Query>) -> Option<RequestId> {
     let outface_mut = get_mut_unchecked(outface);
-    // This `wrapping_add` is kind of "safe" because it would require an incredible amount
-    // of parallel running queries to conflict a currently used id.
-    // However, query ids are encoded with varint algorithm, so an incremental id isn't a
-    // good match, and there is still room for optimization.
-    outface_mut.next_qid = outface_mut.next_qid.wrapping_add(1);
-    let qid = outface_mut.next_qid;
+    // Never reuse an identifier while late replies or cleanup can still name it.
+    let qid = outface_mut.next_qid.checked_add(1)?;
+    outface_mut.next_qid = qid;
     outface_mut.pending_queries.insert(
         qid,
         (query, outface_mut.task_controller.get_cancellation_token()),
     );
-    qid
+    Some(qid)
 }
 
 #[derive(Clone)]
