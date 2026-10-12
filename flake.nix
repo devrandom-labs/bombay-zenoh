@@ -30,6 +30,23 @@
                 (previous.nativeBuildInputs or [ ])
                 ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.darwin.cctools ];
             });
+        compilerFloor =
+          (
+            (fenix.packages.${system}.toolchainOf {
+              channel = "1.88.0";
+              sha256 = "sha256-Qxt8XAuaUR2OMdKbN4u8dBJOhSHxS+uS06Wl9+flVEk=";
+            }).withComponents
+            [
+              "cargo"
+              "rustc"
+              "rust-std"
+            ]
+          ).overrideAttrs
+            (previous: {
+              nativeBuildInputs =
+                (previous.nativeBuildInputs or [ ])
+                ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.darwin.cctools ];
+            });
         miriToolchain =
           (fenix.packages.${system}.toolchainOf {
             channel = "nightly";
@@ -48,6 +65,15 @@
         devShells.default = pkgs.mkShell {
           packages = [
             toolchain
+            pkgs.python3
+            pkgs.gh
+            pkgs.pkg-config
+            pkgs.openssl
+          ];
+        };
+        devShells.compiler-floor = pkgs.mkShell {
+          packages = [
+            compilerFloor
             pkgs.python3
             pkgs.gh
             pkgs.pkg-config

@@ -172,3 +172,124 @@ where
 
     Ok(())
 }
+
+#[cfg(test)]
+mod yaml_include_tests {
+    use std::{collections::HashSet, fs};
+
+    use serde_json::{json, Map, Value};
+    use tempfile::TempDir;
+
+    use super::{deserialize_from_file, recursive_include};
+    use crate::Config;
+
+    #[test]
+    fn yaml_includes_preserve_complete_overrides_and_relative_paths() {
+        let directory = TempDir::new().unwrap();
+        fs::write(directory.path().join("leaf.json5"), "{port:7447}").unwrap();
+        fs::write(
+            directory.path().join("child.yaml"),
+            "same: child\nnested: {__config__: leaf.json5, port: 7}\n",
+        )
+        .unwrap();
+        let included = directory.path().join("child.yaml");
+        let parent = directory.path().join("parent.yaml");
+        let source =
+            json!({"plugins":{"fixture":{"__config__":included,"same":"parent","local":5}}});
+        fs::write(&parent, source.to_string()).unwrap();
+        let actual = Config::from_file(&parent);
+        let expected = json!({"plugins":{"fixture":{"__config__":included,"same":"child","local":5,"nested":{"__config__":"leaf.json5","port":7447}}}});
+        let expected = Config::from_deserializer(&mut serde_json::Deserializer::from_str(
+            &expected.to_string(),
+        ))
+        .unwrap();
+        directory.close().unwrap();
+        let actual = serde_json::to_value(actual.unwrap()).unwrap();
+        let expected = serde_json::to_value(expected).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn yaml_include_values_preserve_scalars_duplicates_and_literal_merges() {
+        for (yaml, expected) in [
+            (
+                "plain: NO\nboolean: true\nnull: null\nnumber: 0b11\n",
+                r#"{"plain":"NO","boolean":true,"null":null,"number":3}"#,
+            ),
+            (
+                "original: &v {port: 1}\nalias: *v\n",
+                r#"{"original":{"port":1},"alias":{"port":1}}"#,
+            ),
+            (
+                "base: &b {x: 1}\nmerged: {<<: *b, y: 2}\n",
+                r#"{"base":{"x":1},"merged":{"<<":{"x":1},"y":2}}"#,
+            ),
+            ("duplicate: 1\nduplicate: 2\n", r#"{"duplicate":2}"#),
+            (
+                "maximum: 18446744073709551615\n",
+                r#"{"maximum":18446744073709551615}"#,
+            ),
+        ] {
+            let directory = TempDir::new().unwrap();
+            let path = directory.path().join("values.yaml");
+            fs::write(&path, yaml).unwrap();
+            let actual = deserialize_from_file::<Value, _>(&path);
+            let expected: Value = serde_json::from_str(expected).unwrap();
+            directory.close().unwrap();
+            let actual = actual.unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn yaml_includes_preserve_structural_io_cycle_and_extension_refusals() {
+        for (name, contents, expected) in [
+            ("nonobject.yaml", Some("[]"), "must contain an object"),
+            ("syntax.yaml", Some("["), "failed to read file"),
+            (
+                "tail.yaml",
+                Some("key: value\n---\n["),
+                "failed to read file",
+            ),
+            (
+                "top.yaml",
+                Some("__config__: leaf.yaml"),
+                "include property on the top level",
+            ),
+            (
+                "cycle.yaml",
+                Some("nested: {__config__: cycle.yaml}"),
+                "loop detected",
+            ),
+            (
+                "unsupported.yml",
+                Some("{}"),
+                "Unsupported file type '.yml'",
+            ),
+            ("missing.yaml", None, "failed to canonicalize path"),
+        ] {
+            let directory = TempDir::new().unwrap();
+            if let Some(contents) = contents {
+                fs::write(directory.path().join(name), contents).unwrap();
+            }
+            let mut actual: Map<String, Value> =
+                serde_json::from_value(json!({"__config__":name})).unwrap();
+            let outcome = recursive_include(
+                "fixture",
+                &mut actual,
+                HashSet::new(),
+                "__config__",
+                directory.path(),
+            );
+            directory.close().unwrap();
+            let refusal = outcome.unwrap_err();
+            assert!(refusal.to_string().contains(expected), "{refusal}");
+        }
+        let mut values: Map<String, Value> = serde_json::from_str(r#"{"__config__":4}"#).unwrap();
+        let refusal = recursive_include("fixture", &mut values, HashSet::new(), "__config__", ".")
+            .unwrap_err();
+        assert!(refusal
+            .to_string()
+            .contains("property must have string type"));
+    }
+}

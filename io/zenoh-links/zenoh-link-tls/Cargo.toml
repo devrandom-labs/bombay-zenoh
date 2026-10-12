@@ -21,16 +21,15 @@ license = { workspace = true }
 license-file = { workspace = true }
 name = "bombay-zenoh-link-tls"
 repository = { workspace = true }
-rust-version = { workspace = true }
-version = { workspace = true }
+rust-version = "1.88.0"
+version = "1.10.2"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 async-trait = { workspace = true }
 base64 = { workspace = true }
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
-rustls-pki-types = { workspace = true }
+rustls-pki-types = { workspace = true, features = ["std"] }
 rustls-webpki = { workspace = true }
 secrecy = { workspace = true }
 socket2 = { workspace = true }

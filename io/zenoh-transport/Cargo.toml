@@ -21,8 +21,8 @@ license = { workspace = true }
 license-file = { workspace = true }
 name = "bombay-zenoh-transport"
 repository = { workspace = true }
-rust-version = { workspace = true }
-version = { workspace = true }
+rust-version = "1.88.0"
+version = "1.10.2"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
@@ -37,7 +37,6 @@ crossbeam-utils = { workspace = true }
 flume = { workspace = true }
 futures = { workspace = true }
 lazy_static = { workspace = true }
-lz4_flex = { workspace = true }
 rand = { workspace = true, features = ["default"] }
 ringbuffer-spsc = { workspace = true }
 serde = { workspace = true, features = ["default"] }

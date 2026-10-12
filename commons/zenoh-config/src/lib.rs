@@ -50,6 +50,7 @@ use qos::{PublisherQoSConfList, QosFilter, QosOverwriteMessage, QosOverwrites};
 use secrecy::{CloneableSecret, DebugSecret, Secret, SerializableSecret, Zeroize};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use tokio::sync::Semaphore;
 use validated_struct::ValidatedMapAssociatedTypes;
 pub use validated_struct::{GetError, ValidatedMap};
 pub use wrappers::ZenohId;
@@ -595,6 +596,12 @@ validated_struct::validator! {
 
         /// The default timeout to apply to queries in milliseconds.
         queries_default_timeout: Option<u64>,
+        /// Maximum ordinary QueryState registrations retained by map state, timeout captures,
+        /// or active native reply callbacks.
+        /// A nonzero value cannot exceed Tokio's Semaphore::MAX_PERMITS. Omission
+        /// preserves unbounded compatibility; this limit is fixed when a Session opens.
+        /// Separate liveliness queries are outside this limit.
+        queries_max_retained: Option<NonZeroUsize> where (queries_max_retained_validator),
 
         /// The routing strategy to use and it's configuration.
         pub routing: #[derive(Default)]
@@ -1587,6 +1594,46 @@ fn config_from_json() {
     println!("{}", serde_json::to_string_pretty(&config).unwrap());
 }
 
+fn queries_max_retained_validator(limit: &Option<NonZeroUsize>) -> bool {
+    match limit {
+        Some(limit) => limit.get() <= Semaphore::MAX_PERMITS,
+        None => true,
+    }
+}
+
+#[test]
+fn retained_query_limits_preserve_validated_inputs() {
+    let mut config = Config::default();
+    let omitted = *config.queries_max_retained();
+    let maximum = NonZeroUsize::new(Semaphore::MAX_PERMITS).unwrap();
+    let accepted = config.set_queries_max_retained(Some(maximum));
+    let maximum_setting = *config.queries_max_retained();
+    let oversized = NonZeroUsize::new(Semaphore::MAX_PERMITS + 1).unwrap();
+    let rejected = config.set_queries_max_retained(Some(oversized));
+    let retained_setting = *config.queries_max_retained();
+    let zero = Config::from_deserializer(&mut serde_json::Deserializer::from_str(
+        r#"{"queries_max_retained":0}"#,
+    ));
+    let oversized_json = format!("{{\"queries_max_retained\":{}}}", oversized.get());
+    let invalid =
+        Config::from_deserializer(&mut serde_json::Deserializer::from_str(&oversized_json));
+    let direct = serde_json::from_str::<Config>(&oversized_json);
+    let removed = config.set_queries_max_retained(None);
+    let legacy_setting = *config.queries_max_retained();
+    assert_eq!(omitted, None);
+    assert_eq!(accepted, Ok(None));
+    assert_eq!(maximum_setting, Some(maximum));
+    assert_eq!(rejected, Err(Some(oversized)));
+    assert_eq!(retained_setting, Some(maximum));
+    assert!(matches!(zero, Err(Err(_))));
+    assert!(
+        matches!(&invalid, Err(Ok(config)) if config.queries_max_retained() == &Some(oversized))
+    );
+    assert!(matches!(&direct, Ok(config) if config.queries_max_retained() == &Some(oversized)));
+    assert_eq!(removed, Ok(Some(maximum)));
+    assert_eq!(legacy_setting, None);
+}
+
 fn sequence_number_resolution_validator(b: &Bits) -> bool {
     b <= &Bits::from(TransportSn::MAX)
 }
@@ -2050,14 +2097,141 @@ impl fmt::Display for GenericConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, fs::File, io::Write, str::FromStr, time::SystemTime};
+    use std::{env, fs};
 
-    use zenoh_protocol::core::{EndPoint, WhatAmI};
+    use tempfile::TempDir;
+    #[cfg(feature = "unstable")]
+    use zenoh_protocol::core::WhatAmI;
 
-    use crate::{Config, ModeDependentValue, ZenohId};
+    #[cfg(feature = "unstable")]
+    use crate::ModeDependentValue;
+    use crate::{Config, Semaphore};
 
     #[test]
-    fn test_toml_config_format() {
+    fn yaml_files_preserve_complete_deployment_configuration() {
+        let yaml = "mode: peer\nqueries_max_retained: 1\nconnect: {endpoints: ['tls/localhost:7447']}\nlisten: {endpoints: ['tls/localhost:7448']}\nscouting: {multicast: {enabled: false}, gossip: {enabled: false}}\ntransport: {link: {tls: {enable_mtls: true, use_public_pki: false, root_ca_certificate: ca.pem}}}\n";
+        let json5 = r#"{mode:'peer',queries_max_retained:1,connect:{endpoints:['tls/localhost:7447']},listen:{endpoints:['tls/localhost:7448']},scouting:{multicast:{enabled:false},gossip:{enabled:false}},transport:{link:{tls:{enable_mtls:true,use_public_pki:false,root_ca_certificate:'ca.pem'}}}}"#;
+        let expected =
+            Config::from_deserializer(&mut json5::Deserializer::from_str(json5).unwrap()).unwrap();
+        let expected = serde_json::to_value(expected).unwrap();
+        for (extension, contents) in [("yaml", yaml), ("yml", yaml), ("json5", json5)] {
+            let directory = TempDir::new().unwrap();
+            let path = directory.path().join(format!("deployment.{extension}"));
+            fs::write(&path, contents).unwrap();
+            let actual = Config::from_file(&path);
+            directory.close().unwrap();
+            let actual = serde_json::to_value(actual.unwrap()).unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn yaml_validation_preserves_complete_configuration_outcomes() {
+        for limit in [
+            "null".to_owned(),
+            "1".to_owned(),
+            "0".to_owned(),
+            Semaphore::MAX_PERMITS.to_string(),
+            (Semaphore::MAX_PERMITS + 1).to_string(),
+        ] {
+            let yaml = format!("queries_max_retained: {limit}");
+            let json = format!("{{\"queries_max_retained\":{limit}}}");
+            let actual = Config::from_deserializer(serde_yaml::Deserializer::from_str(&yaml));
+            let expected =
+                Config::from_deserializer(&mut serde_json::Deserializer::from_str(&json));
+            match (&actual, &expected) {
+                (Ok(actual), Ok(expected)) | (Err(Ok(actual)), Err(Ok(expected))) => {
+                    let actual = serde_json::to_value(actual).unwrap();
+                    let expected = serde_json::to_value(expected).unwrap();
+                    assert_eq!(actual, expected);
+                }
+                (Err(Err(error)), Err(Err(_))) => assert!(error.to_string().contains("nonzero")),
+                _ => panic!("YAML changed the owning validation outcome: {actual:?}, {expected:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn yaml_configuration_preserves_scalar_alias_and_enum_inputs() {
+        for (yaml, json5) in [
+            ("", "{}"),
+            ("metadata: {nonfinite: .inf}", "{metadata:{nonfinite:null}}"),
+            (
+                "mode: &role peer\nmetadata: {alias: *role}",
+                "{mode:'peer',metadata:{alias:'peer'}}",
+            ),
+            (
+                "metadata: {plain: NO, quoted: 'true', boolean: true, empty: null, unicode: '雪'}",
+                "{metadata:{plain:'NO',quoted:'true',boolean:true,empty:null,unicode:'雪'}}",
+            ),
+            (
+                "metadata: {binary: 0b11, hex: 0xF, leading: 0644, finite: 1.5}",
+                "{metadata:{binary:3,hex:15,leading:'0644',finite:1.5}}",
+            ),
+            ("\u{feff}mode: router\n", "{mode:'router'}"),
+            ("mode: !unsupported peer", "{mode:'peer'}"),
+        ] {
+            let actual =
+                Config::from_deserializer(serde_yaml::Deserializer::from_str(yaml)).unwrap();
+            let expected =
+                Config::from_deserializer(&mut json5::Deserializer::from_str(json5).unwrap())
+                    .unwrap();
+            let actual = serde_json::to_value(actual).unwrap();
+            let expected = serde_json::to_value(expected).unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn yaml_configuration_preserves_refusals_and_bounded_depth() {
+        for yaml in [
+            "mode: peer\nmode: router",
+            "mode: peer\n---\nmode: router",
+            "mode: peer\n---\n[",
+            "mode: peer\n...\n[",
+            "metadata: {tagged: !unsupported peer}",
+            "queries_max_retained: 18446744073709551616",
+        ] {
+            let actual = Config::from_deserializer(serde_yaml::Deserializer::from_str(yaml));
+            assert!(matches!(&actual, Err(Err(_))), "{actual:?}");
+        }
+        for depth in [1, 32, 256] {
+            let nested = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+            let yaml = format!("metadata: {nested}");
+            let actual = Config::from_deserializer(serde_yaml::Deserializer::from_str(&yaml));
+            match depth {
+                256 => assert!(matches!(&actual, Err(Err(_)))),
+                _ => {
+                    let mut expected = Config::default();
+                    let metadata = serde_json::from_str(&nested).unwrap();
+                    drop(expected.set_metadata(metadata).unwrap());
+                    let actual = serde_json::to_value(actual.unwrap()).unwrap();
+                    let expected = serde_json::to_value(expected).unwrap();
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires BOMBAY_YAML_SOURCE_CORPUS pointing to the retained authoritative root fixture"]
+    fn yaml_flow_document_preserves_the_actual_configuration_corpus() {
+        let path = env::var_os("BOMBAY_YAML_SOURCE_CORPUS")
+            .expect("explicit corpus execution requires BOMBAY_YAML_SOURCE_CORPUS");
+        let corpus = fs::read_to_string(path).unwrap();
+        let expected =
+            Config::from_deserializer(&mut json5::Deserializer::from_str(&corpus).unwrap())
+                .unwrap();
+        let yaml = serde_json::to_string(&expected).unwrap();
+        let actual = Config::from_deserializer(serde_yaml::Deserializer::from_str(&yaml)).unwrap();
+        let actual = serde_json::to_value(actual).unwrap();
+        let expected = serde_json::to_value(expected).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    #[cfg(feature = "unstable")]
+    fn toml_files_preserve_complete_configuration() {
         const FILE_CONTENTS: &str = r#"
             id = "abc"
             mode = "router"
@@ -2069,37 +2243,25 @@ mod tests {
             enabled = true
         "#;
 
-        let timestamp = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("deployment.toml");
+        fs::write(&path, FILE_CONTENTS).unwrap();
+        let actual = Config::from_file(&path);
+        directory.close().unwrap();
 
-        let path = env::temp_dir().join(format!("{timestamp}.test.config.toml"));
-
-        {
-            let mut tmp = File::create(&path).unwrap();
-            tmp.write_all(FILE_CONTENTS.as_bytes()).unwrap();
-            tmp.flush().unwrap();
-        }
-
-        let expected_config = {
-            let mut c = Config::default();
-            c.set_id(Some(ZenohId::from_str("abc").unwrap())).unwrap();
-            c.set_mode(Some(WhatAmI::Router)).unwrap();
-            c.listen
-                .set_endpoints(ModeDependentValue::Unique(vec![EndPoint::from_str(
-                    "tcp/localhost:7448",
-                )
+        let mut expected = Config::default();
+        expected.set_id(Some("abc".parse().unwrap())).unwrap();
+        expected.set_mode(Some(WhatAmI::Router)).unwrap();
+        expected
+            .listen
+            .set_endpoints(ModeDependentValue::Unique(vec!["tcp/localhost:7448"
+                .parse()
                 .unwrap()]))
-                .unwrap();
-            c.adminspace.set_enabled(true).unwrap();
-            c
-        };
-
-        assert_eq!(
-            Config::from_file(&path).unwrap().to_string(),
-            expected_config.to_string()
-        );
+            .unwrap();
+        expected.adminspace.set_enabled(true).unwrap();
+        let actual = serde_json::to_value(actual.unwrap()).unwrap();
+        let expected = serde_json::to_value(expected).unwrap();
+        assert_eq!(actual, expected);
     }
 
     #[test]

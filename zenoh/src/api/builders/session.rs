@@ -221,12 +221,12 @@ impl Resolvable for InitBuilder {
 #[zenoh_macros::internal]
 impl Wait for InitBuilder {
     fn wait(self) -> <Self as Resolvable>::To {
-        Ok(Session::init(
+        Session::init(
             self.runtime.into(),
             self.aggregated_subscribers,
             self.aggregated_publishers,
         )
-        .wait())
+        .wait()
     }
 }
 

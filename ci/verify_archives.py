@@ -59,6 +59,13 @@ FEATURES = {
 class ReleaseKind(enum.Enum):
     INITIAL_COHORT = "initial-cohort"
     ZENOH_SUCCESSOR = "zenoh-successor"
+    CONFIGURATION_SUCCESSOR = "configuration-successor"
+
+
+CONFIGURATION_CANDIDATES = {
+    "zenoh-config", "zenoh-link-tls", "zenoh-link", "zenoh-plugin-trait",
+    "zenoh-transport", "zenoh",
+}
 
 
 PUBLISHED_REVISION = "e82481825e313ff14e5ea3a1d6e842040945372a"
@@ -83,7 +90,17 @@ def identity(owner):
     return "bombay-" + owner.replace("_", "-")
 
 
+def published_owners(release_kind):
+    if release_kind is ReleaseKind.CONFIGURATION_SUCCESSOR:
+        return set(EDGES) - CONFIGURATION_CANDIDATES
+    if release_kind is ReleaseKind.ZENOH_SUCCESSOR:
+        return set(PUBLISHED_DEPENDENCIES)
+    return set()
+
+
 def version(owner, release_kind=ReleaseKind.INITIAL_COHORT):
+    if release_kind is ReleaseKind.CONFIGURATION_SUCCESSOR and owner in CONFIGURATION_CANDIDATES:
+        return "1.10.8" if owner == "zenoh" else "1.10.2"
     if owner == "zenoh" and release_kind is ReleaseKind.ZENOH_SUCCESSOR:
         return "1.10.7"
     return "1.10.1" if owner in ZENOH_OWNERS else "2.2.0"
@@ -102,6 +119,8 @@ def verify_manifest(owner, manifest, release_kind=ReleaseKind.INITIAL_COHORT):
     require(manifest["lib"]["name"] == owner.replace("-", "_"), f"{owner}: library identity")
     require(package["repository"] == CONTROLLED_REPOSITORY, f"{owner}: repository")
     require(package["license"] == "EPL-2.0 OR Apache-2.0", f"{owner}: license expression")
+    if release_kind is ReleaseKind.CONFIGURATION_SUCCESSOR and owner in CONFIGURATION_CANDIDATES:
+        require(package.get("rust-version") == "1.88.0", f"{owner}: verified compiler floor")
     if owner in {"zenoh-link-commons", "zenoh-link-tls"}:
         require(manifest["dependencies"]["rustls"]["version"] == "0.23.45", f"{owner}: Rustls minimum")
     provenance = package["metadata"]["bombay"]
@@ -121,7 +140,7 @@ def verify_manifest(owner, manifest, release_kind=ReleaseKind.INITIAL_COHORT):
         require(selected not in EDGES, f"{owner}: original dependency edge {alias} -> {selected}")
         if selected.startswith("bombay-"):
             require(alias in EDGES[owner], f"{owner}: unexpected corrected edge {alias}")
-            expected_version = "=1.10.1" if alias in ZENOH_OWNERS else "2.2.0"
+            expected_version = "=" + version(alias, release_kind) if alias in ZENOH_OWNERS else "2.2.0"
             require(selected == identity(alias), f"{owner}: corrected dependency identity {alias}")
             require(specification["version"] == expected_version, f"{owner}: edge version {alias}")
             affected[alias] = selected
@@ -165,7 +184,7 @@ def verify_archive(root, archives, owner, revision, release_kind=ReleaseKind.INI
                    expected_checksum=None):
     prefix = identity(owner) + "-" + version(owner, release_kind)
     archive = archives / (prefix + ".crate")
-    if release_kind is ReleaseKind.ZENOH_SUCCESSOR and owner != "zenoh":
+    if owner in published_owners(release_kind):
         expected_checksum = PUBLISHED_DEPENDENCIES[owner]
     contents = read_archive(archive, prefix, expected_checksum)
     manifest = tomllib.loads(contents["Cargo.toml"].decode())
@@ -249,10 +268,11 @@ def verify_lock(owner, lock, checksums, release_kind=ReleaseKind.INITIAL_COHORT)
     return edges
 
 
-def acquire_published_dependencies(archives):
+def acquire_published_dependencies(archives, release_kind=ReleaseKind.ZENOH_SUCCESSOR):
     receipts = {}
     require(set(PUBLISHED_DEPENDENCIES) == set(EDGES) - {"zenoh"}, "published dependency inventory")
-    for owner, checksum in PUBLISHED_DEPENDENCIES.items():
+    for owner in sorted(published_owners(release_kind)):
+        checksum = PUBLISHED_DEPENDENCIES[owner]
         package, selected_version = identity(owner), version(owner)
         prefix = package + "-" + selected_version
         headers = {"User-Agent": "Bombay controlled dependency release"}
@@ -284,25 +304,25 @@ def main():
     arguments = parser.parse_args()
     root, archives = arguments.root, arguments.archives
     release_kind = ReleaseKind(arguments.release_kind)
-    if release_kind is ReleaseKind.ZENOH_SUCCESSOR:
-        acquire_published_dependencies(archives)
+    if published_owners(release_kind):
+        acquire_published_dependencies(archives, release_kind)
     revision = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
     checksums = {identity(owner): hashlib.sha256(
         (archives / (identity(owner) + "-" + version(owner, release_kind) + ".crate")).read_bytes()).hexdigest()
         for owner in EDGES}
     manifests = {owner: verify_archive(
         root, archives, owner,
-        PUBLISHED_REVISION if release_kind is ReleaseKind.ZENOH_SUCCESSOR and owner != "zenoh" else revision,
+        PUBLISHED_REVISION if owner in published_owners(release_kind) else revision,
         release_kind, checksums[identity(owner)]) for owner in EDGES}
     locks = {owner: tomllib.loads(read_archive(
         archives / (identity(owner) + "-" + version(owner, release_kind) + ".crate"),
         identity(owner) + "-" + version(owner, release_kind), checksums[identity(owner)])["Cargo.lock"].decode()) for owner in EDGES}
     edge_count = sum(len(verify_lock(owner, lock, checksums, release_kind)) for owner, lock in locks.items())
     require(edge_count == 29, "controlled archived checksum edge inventory changed")
-    if release_kind is ReleaseKind.ZENOH_SUCCESSOR:
+    if published_owners(release_kind):
         # Changing gzip metadata preserves source members but violates published byte custody.
         with TemporaryDirectory(prefix="bombay-published-archive-") as temporary:
-            owner = "zenoh-config"
+            owner = sorted(published_owners(release_kind))[0]
             archive_name = identity(owner) + "-" + version(owner) + ".crate"
             original = (archives / archive_name).read_bytes()
             changed = bytearray(original)
@@ -361,11 +381,11 @@ def main():
         else:
             raise ValueError(f"{defect} inversion unexpectedly accepted")
         verify_archive(root, archives, owner,
-                       PUBLISHED_REVISION if release_kind is ReleaseKind.ZENOH_SUCCESSOR and owner != "zenoh" else revision,
+                       PUBLISHED_REVISION if owner in published_owners(release_kind) else revision,
                        release_kind, checksums[identity(owner)])
     if arguments.ledger is not None:
         cohort = {identity(owner): {"version": version(owner, release_kind), "checksum": checksums[identity(owner)]}
-                  for owner in EDGES if release_kind is ReleaseKind.INITIAL_COHORT or owner == "zenoh"}
+                  for owner in EDGES if owner not in published_owners(release_kind)}
         arguments.ledger.write_text(json.dumps(cohort, sort_keys=True) + "\n")
     print(f"Nine actual {release_kind.value} archives and restored archive controls passed; publication remains unproved.")
 

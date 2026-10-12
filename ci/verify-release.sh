@@ -25,7 +25,7 @@ for profile in debug release; do
   cargo clippy --manifest-path ci/release-credential/Cargo.toml --locked --jobs 2 \
     "${build_arguments[@]}" --all-targets -- -D warnings
   cargo test --locked --jobs 2 "${build_arguments[@]}" \
-    -p bombay-zenoh-link-tls outgoing_tls_trust_tests -- --test-threads=1
+    -p bombay-zenoh-link-tls -- --test-threads=1
   cargo test --locked --jobs 2 "${build_arguments[@]}" \
     -p bombay-validated-struct-macros --lib --test structure
   cargo test --locked --jobs 2 "${build_arguments[@]}" \
@@ -75,8 +75,11 @@ for profile in debug release; do
   done
 done
 
-# Verify only the successor against unchanged actual published dependencies.
-cargo package -p bombay-zenoh --no-default-features --features transport_tls --locked --jobs 2
-python3 ci/verify_archives.py "$PWD" "$PWD/target/package" "$PWD/target/package/audited-cohort.json" --release-kind zenoh-successor
+# Dry-run the six exact successors together; Cargo retains their verified registry overlay.
+cargo publish --dry-run -p bombay-zenoh-config -p bombay-zenoh-link-tls \
+  -p bombay-zenoh-plugin-trait -p bombay-zenoh-link -p bombay-zenoh-transport \
+  -p bombay-zenoh --no-default-features --features transport_tls --locked --jobs 2
+python3 ci/verify_archives.py "$PWD" "$PWD/target/package/tmp-crate" "$PWD/target/package/audited-cohort.json" --release-kind configuration-successor
+PYTHONDONTWRITEBYTECODE=1 python3 ci/verify_configuration_cohort_tests.py
 PYTHONDONTWRITEBYTECODE=1 python3 ci/verify_packaged_queries_tests.py
-PYTHONDONTWRITEBYTECODE=1 python3 ci/verify_packaged_queries.py
+BOMBAY_YAML_SOURCE_CORPUS="$PWD/DEFAULT_CONFIG.json5" PYTHONDONTWRITEBYTECODE=1 python3 ci/verify_packaged_queries.py --source-profile configuration-cohort

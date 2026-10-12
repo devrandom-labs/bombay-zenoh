@@ -31,7 +31,9 @@ jobs:
           nix_conf: |
             experimental-features = nix-command flakes
       - name: Verify selected owning contracts and release archives
-        run: nix develop -c bash ci/verify-release.sh
+        run: BOMBAY_YAML_SOURCE_CORPUS="$PWD/DEFAULT_CONFIG.json5" nix develop -c bash ci/verify-release.sh
+      - name: Verify the exact supported compiler floor
+        run: CARGO_TARGET_DIR="$PWD/target/compiler-floor" nix develop .#compiler-floor -c bash ci/compiler-floor.sh
       - name: Verify actual configuration syntax owner under Miri
         run: nix develop .#miri -c cargo miri test --locked -p bombay-validated-struct-macros --test structure
       - name: Preserve verified release archives
@@ -41,7 +43,11 @@ jobs:
           name: controlled-package-archives-${{ github.sha }}
           path: |
             target/package/bombay-*.crate
+            target/package/tmp-crate/bombay-*.crate
+            target/package/tmp-crate/published-dependencies.json
             target/package/audited-cohort.json
             target/package/packaged-query-*
+            target/package/packaged-config-*
+            target/package/compiler-floor-evidence.*/**
           if-no-files-found: error
           retention-days: 14

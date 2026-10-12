@@ -12,8 +12,8 @@ maintainer_macros = ["maintainer", "zenoh/unstable"]
 validated_struct = { package = "bombay-validated-struct", path = "../../dependencies/validated-struct", features = ["json_get", "json5"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
-zenoh_config = { package = "bombay-zenoh-config", path = "../../commons/zenoh-config", version = "=1.10.1" }
-zenoh = { package = "bombay-zenoh", path = "../../zenoh", version = "=1.10.7" }
-zenoh_link = { package = "bombay-zenoh-link", path = "../../io/zenoh-link", version = "=1.10.1", features = ["transport_tls"] }
+zenoh_config = { package = "bombay-zenoh-config", path = "../../commons/zenoh-config", version = "=1.10.2" }
+zenoh = { package = "bombay-zenoh", path = "../../zenoh", version = "=1.10.8" }
+zenoh_link = { package = "bombay-zenoh-link", path = "../../io/zenoh-link", version = "=1.10.2", features = ["transport_tls"] }
 
 [workspace]

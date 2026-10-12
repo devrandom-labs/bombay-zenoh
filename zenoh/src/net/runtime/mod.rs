@@ -21,6 +21,8 @@ mod adminspace;
 pub mod orchestrator;
 mod region;
 
+#[cfg(test)]
+use std::cell::Cell;
 #[cfg(all(feature = "unstable", feature = "shared-memory"))]
 use std::future::IntoFuture;
 #[cfg(feature = "unstable")]
@@ -677,8 +679,15 @@ impl fmt::Debug for RuntimeBuilder {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static RUNTIME_CONSTRUCTION_ENTRIES: Cell<usize> = const { Cell::new(0) };
+}
+
 impl RuntimeBuilder {
     pub fn new(config: Config) -> Self {
+        #[cfg(test)]
+        RUNTIME_CONSTRUCTION_ENTRIES.with(|entries| entries.set(entries.get() + 1));
         Self {
             config: config.0.expanded(),
             #[cfg(feature = "plugins")]
