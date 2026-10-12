@@ -32,6 +32,7 @@ use zenoh_protocol::{
 };
 
 use super::{try_init_tracing_subscriber, FaceDef, HarnessBuilder};
+use crate::api::builders::close::CloseBuilder;
 use crate::net::{
     primitives::Primitives,
     tests::regions::{Connection, EstablishedConnection},
@@ -2285,7 +2286,7 @@ async fn routed_queries_keep_their_original_consumers_at_identifier_exhaustion()
             ._runtime
             .as_ref()
             .expect("the actual router owns its runtime");
-        closed_runtime = Some(runtime.close().await);
+        closed_runtime = Some(CloseBuilder::new(runtime).await);
     })
     .await;
     let remaining_queries = {
@@ -2489,7 +2490,7 @@ async fn routed_queries_issue_the_last_identifier_once_and_preserve_target_selec
                 let joined = face.face.state.task_controller.terminate_all_async().await;
                 joined_tasks.push(joined);
             }
-            closed_runtime = Some(router._runtime.as_ref().unwrap().close().await);
+            closed_runtime = Some(CloseBuilder::new(router._runtime.as_ref().unwrap()).await);
         })
         .await;
         assert!(
