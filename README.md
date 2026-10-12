@@ -32,7 +32,7 @@ published dependencies; historical resume keeps its original source/transaction.
 Required review/CI, registry publication and a clean registry-only consumer must
 pass before claiming a successor delivered.
 
-The predecessor candidate, `1.10.5`, corrected the owning query test to use its
+Published `1.10.5` corrected the owning query test to use its
 configuration owner directly. The original published1.10.4 test relied on an
 unstable wrapper interface enabled implicitly by workspace tests; its standalone
 TLS-only compilation failed. The production query-ID correction and verified
@@ -40,7 +40,7 @@ TLS-only compilation failed. The production query-ID correction and verified
 the actual packaged owning test outside the workspace with only default TLS,
 in both debug and optimized profiles. All eight support copies remain unchanged.
 Required review/CI, publication, actual registry archives and clean consumer
-verification remain gates for this candidate.
+verification passed for this release.
 
 This local source is based on upstream revision
 `1211779c3647f5a96713dade452c546a07823580` (1.10.1). The controlled package
@@ -205,7 +205,7 @@ In case of trouble, please first check [this page](https://zenoh.io/docs/getting
 Otherwise, you can ask a question on the [Zenoh Discord server](https://discord.gg/vSDSpqnbkm), or [create an issue](https://github.com/eclipse-zenoh/zenoh/issues).
 
 
-The next top-only candidate, `1.10.6`, retires each query's existing timeout
+Published `1.10.6` retires each query's existing timeout
 owner when its native QueryState is destroyed. It uses Tokio-util's existing
 cancellation guard; the Session TaskController retains actual join authority.
 Native controls cover completed queries and querier retirement while a Query
@@ -214,3 +214,19 @@ acquired before assertions. Release CI executes these two owning tests and the
 identifier test from the audited normalized archive in both profiles with only
 default TLS features. This proves prompt retained-reference retirement in local
 native queries; router pressure, query quotas and blocked callbacks remain open.
+
+
+The top-only `1.10.7` candidate also prevents forwarded query identifiers from
+wrapping or being reused during a Face lifetime. It issues the last identifier
+once and omits further directions on that exhausted face without replacing an
+older query or its timeout token. Existing target selection remains intact:
+All/AllComplete preserve other eligible faces, while BestMatching does not add
+failover after its selected face is exhausted. Native empty-route FINAL is
+query-stream completion, not authenticated actor refusal or nonexecution proof.
+Owning tests retain original consumers and exact reply destinations, observe
+retirement before duplicate FINAL, and join controllers/Runtime before oracles.
+Release verification retains the three default-TLS packaged laws and adds two
+exact router laws in a separate TLS,test maintainer profile, without workspace
+feature unification. Required review/CI, actual publication and registry-only
+verification remain gates. Router pressure, global quotas, actual timeout-expiry
+conservation and blocked callbacks remain separate obligations.
