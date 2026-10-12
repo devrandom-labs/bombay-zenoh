@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 
 repository="$PWD"
 : "${CARGO_TARGET_DIR:?Select an explicit compiler-floor build target}"
