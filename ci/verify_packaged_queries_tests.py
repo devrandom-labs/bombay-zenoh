@@ -1,5 +1,6 @@
 """Independent finite observations for the packaged query CI gates."""
 from pathlib import Path
+import copy
 import unittest
 
 from verify_packaged_queries import QUERY_TESTS, ROUTED_QUERY_TESTS, verify_candidate_lock, verify_query_execution, verify_query_profile
@@ -61,6 +62,34 @@ class PackagedQueryEvidence(unittest.TestCase):
             verify_candidate_lock(original_lock, execution, candidates)
         execution["package"][0]["version"] = "1.10.2"
         verify_candidate_lock(original_lock, execution, candidates)
+
+    def test_cargo_format_upgrade_preserves_every_other_lock_fact(self):
+        original = b'version = 3\n[[package]]\nname = "bombay-zenoh-config"\nversion = "1.10.2"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "reviewed"\ndependencies = ["serde 1.0.228"]\n[[package]]\nname = "serde"\nversion = "1.0.228"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "unchanged"\n'
+        execution = {"version": 4, "package": [
+            {"name": "bombay-zenoh-config", "version": "1.10.2", "dependencies": ["serde 1.0.228"]},
+            {"name": "serde", "version": "1.0.228", "source": "registry+https://github.com/rust-lang/crates.io-index", "checksum": "unchanged"},
+        ]}
+        candidates = {"bombay-zenoh-config": Path("/tmp/candidate/Cargo.toml")}
+        verify_candidate_lock(original, execution, candidates)
+        for format_version in (None, 1, 2, 5):
+            changed = copy.deepcopy(execution)
+            if format_version is None:
+                changed.pop("version")
+            else:
+                changed["version"] = format_version
+            with self.subTest(format=format_version), self.assertRaisesRegex(AssertionError, "unrelated records"):
+                verify_candidate_lock(original, changed, candidates)
+        for field, value in (("version", "1.0.229"), ("source", "git+https://unreviewed.invalid"), ("checksum", "changed"), ("dependencies", ["unreviewed"])):
+            changed = copy.deepcopy(execution)
+            changed["package"][1][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(AssertionError, "unrelated records"):
+                verify_candidate_lock(original, changed, candidates)
+        changed = copy.deepcopy(execution)
+        changed["metadata"] = {"unreviewed": "value"}
+        with self.assertRaisesRegex(AssertionError, "unrelated records"):
+            verify_candidate_lock(original, changed, candidates)
+        execution["version"] = 3
+        verify_candidate_lock(original, execution, candidates)
 
     def test_maintainer_profile_preserves_registry_and_alias_denials(self):
         manifest = Path("/tmp/packaged/Cargo.toml")

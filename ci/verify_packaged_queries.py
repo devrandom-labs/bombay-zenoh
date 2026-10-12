@@ -69,6 +69,8 @@ def verify_query_execution(output, query_test):
 
 def verify_candidate_lock(original, execution, candidates):
     expected = tomllib.loads(original.decode())
+    if expected["version"] == 3 and execution.get("version") == 4:
+        expected["version"] = 4
     for package in expected["package"]:
         if package["name"] in candidates:
             assert package["version"] == "1.10.2", "archived candidate version changed"
@@ -131,9 +133,9 @@ def main():
             Path("target/package/packaged-query-candidate-resolve.stdout").write_text(resolved.stdout)
             Path("target/package/packaged-query-candidate-resolve.stderr").write_text(resolved.stderr)
             resolved.check_returncode()
+            Path("target/package/packaged-query-candidate-Cargo.lock").write_bytes((source / "Cargo.lock").read_bytes())
             verify_candidate_lock(archive_custody["Cargo.lock"], tomllib.loads((source / "Cargo.lock").read_text()), candidates)
             verify_query_profile(json.loads(resolved.stdout), manifest, candidates=candidates)
-            Path("target/package/packaged-query-candidate-Cargo.lock").write_bytes((source / "Cargo.lock").read_bytes())
             execution_custody["Cargo.lock"] = (source / "Cargo.lock").read_bytes()
         for profile_prefix, features, feature_arguments, query_tests in (
             ("", ("default", "transport_tls"), [], QUERY_TESTS),
