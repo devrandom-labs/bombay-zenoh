@@ -56,6 +56,19 @@ commons `1.10.2`, TLS link/link/transport `1.10.3`, and top `1.10.9`. Config/plu
 select fixed Rustls in their verified lock; older SDK declarations still permit
 `0.23.45`. Local lock correction does not prove this successor published.
 
+The candidate also corrects the TLS link's cross-direction stream ownership.
+One Tokio split owns the stream, with shared exclusion during each poll and
+separate ordering of read and write operations. Pending reads therefore permit
+writes without simultaneous mutable access to the TLS connection. This removes
+the prior UnsafeCell, manual Send/Sync implementations and blocking destructor.
+Explicit close uses the owning TLS shutdown, including close_notify; abandoning
+the whole owner releases its socket and does not claim graceful shutdown.
+The existing Zenoh error source form retains original I/O causes. Private tests
+use package-local copies of the existing validated TLS fixture certificates.
+No transport, public type, dependency identity or resource default is added.
+These candidate changes require their own affected-source release/CI review;
+earlier checks on23676e6 do not establish delivery of the ownership correction.
+
 All five security candidates declare Rust `1.88.0`. Their actual source,
 normalized archives, compiler-floor checks, required CI, reviewed merge,
 publication and registry-only consumers remain delivery gates. No numeric default
