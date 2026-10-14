@@ -1,9 +1,12 @@
 """Independent finite observations for the packaged query CI gates."""
 from pathlib import Path
 import copy
+import tomllib
 import unittest
 
-from verify_packaged_queries import QUERY_TESTS, ROUTED_QUERY_TESTS, verify_candidate_lock, verify_query_execution, verify_query_profile
+from verify_archives import ReleaseKind, TLS_SECURITY_CANDIDATES, version
+
+from verify_packaged_queries import QuerySourceProfile, query_release_kind, QUERY_TESTS, ROUTED_QUERY_TESTS, verify_candidate_lock, verify_query_execution, verify_query_profile
 
 
 class PackagedQueryEvidence(unittest.TestCase):
@@ -90,6 +93,74 @@ class PackagedQueryEvidence(unittest.TestCase):
             verify_candidate_lock(original, changed, candidates)
         execution["version"] = 3
         verify_candidate_lock(original, execution, candidates)
+
+    def test_security_candidates_preserve_versions_original_locks_and_registry_edges(self):
+        kind = ReleaseKind.TLS_SECURITY_SUCCESSOR
+        manifest = Path("/tmp/packaged/Cargo.toml")
+        owner = {"id": "owner", "manifest_path": str(manifest), "dependencies": []}
+        expected_versions = {"zenoh-link-commons": "1.10.2", "zenoh-link-tls": "1.10.3",
+                             "zenoh-link": "1.10.3", "zenoh-transport": "1.10.3"}
+        self.assertEqual(TLS_SECURITY_CANDIDATES - {"zenoh"}, set(expected_versions))
+        sdk_version = version("zenoh", kind)
+        self.assertEqual(sdk_version, "1.10.9")
+        packages = [{"id": name, "name": "bombay-" + name, "version": expected,
+                     "source": None, "manifest_path": "/tmp/" + name + "/Cargo.toml"}
+                    for name, expected in sorted(expected_versions.items())]
+        registry = {"id": "config", "name": "bombay-zenoh-config", "version": "1.10.2",
+                    "source": "registry+https://github.com/rust-lang/crates.io-index"}
+        rustls = {"id": "rustls", "name": "rustls", "version": "0.23.46", "source": registry["source"]}
+        metadata = {"packages": [owner, *packages, registry, rustls],
+                    "resolve": {"nodes": [{"id": "owner", "features": ["default", "transport_tls"]}]}}
+        candidates = {package["name"]: Path(package["manifest_path"]) for package in packages}
+        verify_query_profile(metadata, manifest, candidates=candidates, release_kind=kind)
+        for package in packages:
+            original = package["version"]
+            package["version"] = "1.10.1"
+            with self.subTest(owner=package["name"]), self.assertRaisesRegex(AssertionError, "candidate dependency version"):
+                verify_query_profile(metadata, manifest, candidates=candidates, release_kind=kind)
+            package["version"] = original
+        registry["source"] = None
+        with self.assertRaisesRegex(AssertionError, "actual crates.io"):
+            verify_query_profile(metadata, manifest, candidates=candidates, release_kind=kind)
+        registry["source"] = rustls["source"]
+        rustls["version"] = "0.23.45"
+        with self.assertRaisesRegex(AssertionError, "packaged Rustls minimum"):
+            verify_query_profile(metadata, manifest, candidates=candidates, release_kind=kind)
+        rustls["version"] = "0.23.46"
+        verify_query_profile(metadata, manifest, candidates=candidates, release_kind=kind)
+        original = ('version = 3\n' + ''.join('[[package]]\nname = "' + package["name"] +
+                    '"\nversion = "' + package["version"] + '"\nsource = "' + rustls["source"] +
+                    '"\nchecksum = "reviewed"\n' for package in packages + [registry, rustls])).encode()
+        execution = tomllib.loads(original.decode())
+        execution["version"] = 4
+        for package in execution["package"]:
+            if package["name"] in candidates:
+                package.pop("source")
+                package.pop("checksum")
+        verify_candidate_lock(original, execution, candidates, kind)
+        changed = copy.deepcopy(execution)
+        next(package for package in changed["package"] if package["name"] == "bombay-zenoh-config").pop("checksum")
+        with self.assertRaisesRegex(AssertionError, "unrelated records"):
+            verify_candidate_lock(original, changed, candidates, kind)
+        verify_candidate_lock(original, execution, candidates, kind)
+
+    def test_source_profiles_refuse_conflicting_release_kinds(self):
+        registry_kind = query_release_kind(QuerySourceProfile.REGISTRY, None)
+        self.assertIs(registry_kind, ReleaseKind.TLS_SECURITY_SUCCESSOR)
+        for profile, expected in ((QuerySourceProfile.CONFIGURATION_COHORT, ReleaseKind.CONFIGURATION_SUCCESSOR),
+                                  (QuerySourceProfile.TLS_SECURITY_COHORT, ReleaseKind.TLS_SECURITY_SUCCESSOR)):
+            default_kind = query_release_kind(profile, None)
+            self.assertIs(default_kind, expected)
+            for kind in ReleaseKind:
+                if kind is expected:
+                    selected_kind = query_release_kind(profile, kind)
+                    self.assertIs(selected_kind, expected)
+                else:
+                    with self.subTest(profile=profile, kind=kind), self.assertRaisesRegex(AssertionError, "profile and release kind conflict"):
+                        query_release_kind(profile, kind)
+        for kind in ReleaseKind:
+            registry_kind = query_release_kind(QuerySourceProfile.REGISTRY, kind)
+            self.assertIs(registry_kind, kind)
 
     def test_maintainer_profile_preserves_registry_and_alias_denials(self):
         manifest = Path("/tmp/packaged/Cargo.toml")

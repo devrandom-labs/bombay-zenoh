@@ -60,11 +60,22 @@ class ReleaseKind(enum.Enum):
     INITIAL_COHORT = "initial-cohort"
     ZENOH_SUCCESSOR = "zenoh-successor"
     CONFIGURATION_SUCCESSOR = "configuration-successor"
+    TLS_SECURITY_SUCCESSOR = "tls-security-successor"
 
 
 CONFIGURATION_CANDIDATES = {
     "zenoh-config", "zenoh-link-tls", "zenoh-link", "zenoh-plugin-trait",
     "zenoh-transport", "zenoh",
+}
+
+
+TLS_SECURITY_CANDIDATES = {"zenoh-link-commons", "zenoh-link-tls", "zenoh-link", "zenoh-transport", "zenoh"}
+TLS_SECURITY_PUBLISHED_REVISION = "5bebbcb07a7650aff33e08736b8434cf2ccf1706"
+TLS_SECURITY_PUBLISHED_DEPENDENCIES = {
+    "zenoh-config": "53388443cdb56bb3c14afb2adc359759c9241caebcd05b07635cdd1c39b9201c",
+    "zenoh-plugin-trait": "73944481527b2994cfc6acc29410c556ba65bce16b5cba32d1bba6b3e2edf503",
+    "validated_struct": "b1b9764c93caf9628a9c391a92132f1bc84a8816b01ff486cc18b08101e2c3c7",
+    "validated_struct_macros": "602d3538d65be50613f90d69dd21c504d4e894ae2ae13c41ba89163fd4b33b55",
 }
 
 
@@ -90,7 +101,19 @@ def identity(owner):
     return "bombay-" + owner.replace("_", "-")
 
 
+def published_dependencies(release_kind):
+    return TLS_SECURITY_PUBLISHED_DEPENDENCIES if release_kind is ReleaseKind.TLS_SECURITY_SUCCESSOR else PUBLISHED_DEPENDENCIES
+
+
+def published_revision(owner, release_kind):
+    if release_kind is ReleaseKind.TLS_SECURITY_SUCCESSOR and owner in {"zenoh-config", "zenoh-plugin-trait"}:
+        return TLS_SECURITY_PUBLISHED_REVISION
+    return PUBLISHED_REVISION
+
+
 def published_owners(release_kind):
+    if release_kind is ReleaseKind.TLS_SECURITY_SUCCESSOR:
+        return set(EDGES) - TLS_SECURITY_CANDIDATES
     if release_kind is ReleaseKind.CONFIGURATION_SUCCESSOR:
         return set(EDGES) - CONFIGURATION_CANDIDATES
     if release_kind is ReleaseKind.ZENOH_SUCCESSOR:
@@ -99,6 +122,10 @@ def published_owners(release_kind):
 
 
 def version(owner, release_kind=ReleaseKind.INITIAL_COHORT):
+    if release_kind is ReleaseKind.TLS_SECURITY_SUCCESSOR:
+        return {"zenoh": "1.10.9", "zenoh-link-commons": "1.10.2", "zenoh-link-tls": "1.10.3",
+                "zenoh-link": "1.10.3", "zenoh-transport": "1.10.3", "zenoh-config": "1.10.2",
+                "zenoh-plugin-trait": "1.10.2", "validated_struct": "2.2.0", "validated_struct_macros": "2.2.0"}[owner]
     if release_kind is ReleaseKind.CONFIGURATION_SUCCESSOR and owner in CONFIGURATION_CANDIDATES:
         return "1.10.8" if owner == "zenoh" else "1.10.2"
     if owner == "zenoh" and release_kind is ReleaseKind.ZENOH_SUCCESSOR:
@@ -119,10 +146,12 @@ def verify_manifest(owner, manifest, release_kind=ReleaseKind.INITIAL_COHORT):
     require(manifest["lib"]["name"] == owner.replace("-", "_"), f"{owner}: library identity")
     require(package["repository"] == CONTROLLED_REPOSITORY, f"{owner}: repository")
     require(package["license"] == "EPL-2.0 OR Apache-2.0", f"{owner}: license expression")
-    if release_kind is ReleaseKind.CONFIGURATION_SUCCESSOR and owner in CONFIGURATION_CANDIDATES:
+    if (release_kind is ReleaseKind.CONFIGURATION_SUCCESSOR and owner in CONFIGURATION_CANDIDATES
+            or release_kind is ReleaseKind.TLS_SECURITY_SUCCESSOR and owner in TLS_SECURITY_CANDIDATES):
         require(package.get("rust-version") == "1.88.0", f"{owner}: verified compiler floor")
     if owner in {"zenoh-link-commons", "zenoh-link-tls"}:
-        require(manifest["dependencies"]["rustls"]["version"] == "0.23.45", f"{owner}: Rustls minimum")
+        minimum = "0.23.46" if release_kind is ReleaseKind.TLS_SECURITY_SUCCESSOR else "0.23.45"
+        require(manifest["dependencies"].get("rustls", {}).get("version") == minimum, f"{owner}: Rustls minimum")
     provenance = package["metadata"]["bombay"]
     if owner in ZENOH_OWNERS:
         revision, repository, profile = ZENOH_REVISION, "https://github.com/eclipse-zenoh/zenoh", "tls-only"
@@ -162,10 +191,10 @@ def verify_manifest(owner, manifest, release_kind=ReleaseKind.INITIAL_COHORT):
 
 
 def read_archive(archive, prefix, expected_checksum=None):
+    require(isinstance(expected_checksum, str), f"{prefix}: required archive checksum")
     archive_bytes = archive.read_bytes()
-    if expected_checksum is not None:
-        require(hashlib.sha256(archive_bytes).hexdigest() == expected_checksum,
-                f"{prefix}: immutable archive checksum")
+    require(hashlib.sha256(archive_bytes).hexdigest() == expected_checksum,
+            f"{prefix}: immutable archive checksum")
     contents = {}
     with tarfile.open(fileobj=BytesIO(archive_bytes), mode="r:gz") as packaged:
         for member in packaged.getmembers():
@@ -185,7 +214,9 @@ def verify_archive(root, archives, owner, revision, release_kind=ReleaseKind.INI
     prefix = identity(owner) + "-" + version(owner, release_kind)
     archive = archives / (prefix + ".crate")
     if owner in published_owners(release_kind):
-        expected_checksum = PUBLISHED_DEPENDENCIES[owner]
+        expected_checksum = published_dependencies(release_kind)[owner]
+    elif expected_checksum is None:
+        expected_checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
     contents = read_archive(archive, prefix, expected_checksum)
     manifest = tomllib.loads(contents["Cargo.toml"].decode())
     verify_manifest(owner, manifest, release_kind)
@@ -221,6 +252,9 @@ def verify_lock(owner, lock, checksums, release_kind=ReleaseKind.INITIAL_COHORT)
     require(source_names == [identity(owner)], f"{owner}: locked owning source node")
     controlled_names = {identity(dependency): dependency for dependency in EDGES}
     edges = []
+    if release_kind is ReleaseKind.TLS_SECURITY_SUCCESSOR and owner in TLS_SECURITY_CANDIDATES:
+        rustls = [package for package in lock["package"] if package["name"] == "rustls"]
+        require(len(rustls) == 1 and rustls[0]["version"] == "0.23.46", f"{owner}: locked Rustls minimum")
     for package in lock["package"]:
         name = package["name"]
         require(name not in EDGES, f"{owner}: original locked dependency {name}")
@@ -272,8 +306,8 @@ def acquire_published_dependencies(archives, release_kind=ReleaseKind.ZENOH_SUCC
     receipts = {}
     require(set(PUBLISHED_DEPENDENCIES) == set(EDGES) - {"zenoh"}, "published dependency inventory")
     for owner in sorted(published_owners(release_kind)):
-        checksum = PUBLISHED_DEPENDENCIES[owner]
-        package, selected_version = identity(owner), version(owner)
+        checksum = published_dependencies(release_kind)[owner]
+        package, selected_version = identity(owner), version(owner, release_kind)
         prefix = package + "-" + selected_version
         headers = {"User-Agent": "Bombay controlled dependency release"}
         with urlopen(Request(f"https://crates.io/api/v1/crates/{package}/{selected_version}",
@@ -289,7 +323,7 @@ def acquire_published_dependencies(archives, release_kind=ReleaseKind.ZENOH_SUCC
         require(hashlib.sha256(archive.read_bytes()).hexdigest() == checksum,
                 f"{owner}: immutable published archive checksum")
         receipts[package] = {"version": selected_version, "checksum": checksum,
-                             "expected_source": PUBLISHED_REVISION}
+                             "expected_source": published_revision(owner, release_kind)}
         (archives / "published-dependencies.json").write_text(
             json.dumps(receipts, indent=2, sort_keys=True) + "\n")
 
@@ -312,7 +346,7 @@ def main():
         for owner in EDGES}
     manifests = {owner: verify_archive(
         root, archives, owner,
-        PUBLISHED_REVISION if owner in published_owners(release_kind) else revision,
+        published_revision(owner, release_kind) if owner in published_owners(release_kind) else revision,
         release_kind, checksums[identity(owner)]) for owner in EDGES}
     locks = {owner: tomllib.loads(read_archive(
         archives / (identity(owner) + "-" + version(owner, release_kind) + ".crate"),
@@ -323,21 +357,21 @@ def main():
         # Changing gzip metadata preserves source members but violates published byte custody.
         with TemporaryDirectory(prefix="bombay-published-archive-") as temporary:
             owner = sorted(published_owners(release_kind))[0]
-            archive_name = identity(owner) + "-" + version(owner) + ".crate"
+            archive_name = identity(owner) + "-" + version(owner, release_kind) + ".crate"
             original = (archives / archive_name).read_bytes()
             changed = bytearray(original)
             changed[4] ^= 1
             mutant_archives = Path(temporary)
             (mutant_archives / archive_name).write_bytes(changed)
             try:
-                verify_archive(root, mutant_archives, owner, PUBLISHED_REVISION, release_kind)
+                verify_archive(root, mutant_archives, owner, published_revision(owner, release_kind), release_kind)
             except ValueError as refused:
                 require("immutable archive checksum" in str(refused),
                         f"wrong published archive inversion diagnostic: {refused}")
                 print(f"intended published archive inversion refused: {refused}")
             else:
                 raise ValueError("changed immutable published archive unexpectedly accepted")
-            verify_archive(root, archives, owner, PUBLISHED_REVISION, release_kind)
+            verify_archive(root, archives, owner, published_revision(owner, release_kind), release_kind)
     for defect in ("checksum", "identity", "closure", "reference"):
         mutant = copy.deepcopy(locks["zenoh-config"])
         dependency = next(package for package in mutant["package"]
@@ -381,7 +415,7 @@ def main():
         else:
             raise ValueError(f"{defect} inversion unexpectedly accepted")
         verify_archive(root, archives, owner,
-                       PUBLISHED_REVISION if owner in published_owners(release_kind) else revision,
+                       published_revision(owner, release_kind) if owner in published_owners(release_kind) else revision,
                        release_kind, checksums[identity(owner)])
     if arguments.ledger is not None:
         cohort = {identity(owner): {"version": version(owner, release_kind), "checksum": checksums[identity(owner)]}

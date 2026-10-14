@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "bombay-zenoh"
-version = "1.10.8"
+version = "1.10.9"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "bombay-zenoh-link"
-version = "1.10.2"
+version = "1.10.3"
 dependencies = [
  "bombay-zenoh-config",
  "bombay-zenoh-link-commons",
@@ -301,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "bombay-zenoh-link-commons"
-version = "1.10.1"
+version = "1.10.2"
 dependencies = [
  "async-trait",
  "flume",
@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "bombay-zenoh-link-tls"
-version = "1.10.2"
+version = "1.10.3"
 dependencies = [
  "async-trait",
  "base64",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "bombay-zenoh-transport"
-version = "1.10.2"
+version = "1.10.3"
 dependencies = [
  "async-trait",
  "bombay-zenoh-config",
@@ -2100,9 +2100,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "log",
  "once_cell",

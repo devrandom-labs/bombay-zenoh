@@ -9,7 +9,7 @@ import subprocess
 from tempfile import TemporaryDirectory
 import tomllib
 
-from verify_archives import CONFIGURATION_CANDIDATES, identity, read_archive, version, ReleaseKind
+from verify_archives import CONFIGURATION_CANDIDATES, TLS_SECURITY_CANDIDATES, identity, published_dependencies, read_archive, version, ReleaseKind
 
 QUERY_TESTS = (
     "api::session::query_identifiers::accepted_queries_keep_their_reply_consumer_at_identifier_exhaustion",
@@ -38,9 +38,22 @@ ROUTED_QUERY_TESTS = (
 class QuerySourceProfile(enum.Enum):
     REGISTRY = "registry"
     CONFIGURATION_COHORT = "configuration-cohort"
+    TLS_SECURITY_COHORT = "tls-security-cohort"
 
 
-def verify_query_profile(metadata, manifest, features=("default", "transport_tls"), candidates=None):
+def query_release_kind(source_profile, selected_kind):
+    allowed = {
+        QuerySourceProfile.REGISTRY: (ReleaseKind.INITIAL_COHORT, ReleaseKind.ZENOH_SUCCESSOR,
+                                     ReleaseKind.CONFIGURATION_SUCCESSOR, ReleaseKind.TLS_SECURITY_SUCCESSOR),
+        QuerySourceProfile.CONFIGURATION_COHORT: (ReleaseKind.CONFIGURATION_SUCCESSOR,),
+        QuerySourceProfile.TLS_SECURITY_COHORT: (ReleaseKind.TLS_SECURITY_SUCCESSOR,),
+    }
+    kind = allowed[source_profile][-1] if selected_kind is None else selected_kind
+    assert kind in allowed[source_profile], "query source profile and release kind conflict"
+    return kind
+
+
+def verify_query_profile(metadata, manifest, features=("default", "transport_tls"), candidates=None, release_kind=ReleaseKind.CONFIGURATION_SUCCESSOR):
     owner = next(package for package in metadata["packages"] if package["manifest_path"] == str(manifest))
     node = next(node for node in metadata["resolve"]["nodes"] if node["id"] == owner["id"])
     assert node["features"] == list(features), "packaged query requires only default TLS or explicit maintainer TLS,test features"
@@ -52,13 +65,16 @@ def verify_query_profile(metadata, manifest, features=("default", "transport_tls
             continue
         if package.get("name") in candidates:
             assert package["source"] is None, "candidate dependency must use its audited archive"
-            assert package["version"] == "1.10.2", "candidate dependency version changed"
+            assert package["version"] == version(package["name"].removeprefix("bombay-"), release_kind), "candidate dependency version changed"
             assert package["manifest_path"] == str(candidates[package["name"]]), "candidate archive owner changed"
             assert package["name"] not in observed_candidates, "duplicate candidate dependency"
             observed_candidates.add(package["name"])
         else:
             assert package["source"] == "registry+https://github.com/rust-lang/crates.io-index", "packaged dependencies must be actual crates.io packages"
     assert observed_candidates == set(candidates), "candidate dependency closure changed"
+    if release_kind is ReleaseKind.TLS_SECURITY_SUCCESSOR:
+        rustls = [package for package in metadata["packages"] if package.get("name") == "rustls"]
+        assert len(rustls) == 1 and rustls[0]["version"] == "0.23.46", "packaged Rustls minimum changed"
 
 
 def verify_query_execution(output, query_test):
@@ -67,13 +83,13 @@ def verify_query_execution(output, query_test):
     assert "test result: ok. 1 passed; 0 failed; 0 ignored;" in output, "the owning query test cannot be skipped"
 
 
-def verify_candidate_lock(original, execution, candidates):
+def verify_candidate_lock(original, execution, candidates, release_kind=ReleaseKind.CONFIGURATION_SUCCESSOR):
     expected = tomllib.loads(original.decode())
     if expected["version"] == 3 and execution.get("version") == 4:
         expected["version"] = 4
     for package in expected["package"]:
         if package["name"] in candidates:
-            assert package["version"] == "1.10.2", "archived candidate version changed"
+            assert package["version"] == version(package["name"].removeprefix("bombay-"), release_kind), "archived candidate version changed"
             registry_source = package.pop("source")
             assert registry_source == "registry+https://github.com/rust-lang/crates.io-index", "archived candidate registry changed"
             package.pop("checksum")
@@ -84,10 +100,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-profile", choices=[profile.value for profile in QuerySourceProfile], default=QuerySourceProfile.REGISTRY.value)
     parser.add_argument("--archives", type=Path)
+    parser.add_argument("--release-kind", choices=[kind.value for kind in ReleaseKind])
     options = parser.parse_args()
     source_profile = QuerySourceProfile(options.source_profile)
-    archives = options.archives or (Path("target/package/tmp-crate") if source_profile is QuerySourceProfile.CONFIGURATION_COHORT else Path("target/package"))
+    release_kind = query_release_kind(source_profile, ReleaseKind(options.release_kind) if options.release_kind else None)
+    archives = options.archives or (Path("target/package") if source_profile is QuerySourceProfile.REGISTRY else Path("target/package/tmp-crate"))
     selected_version = tomllib.loads(Path("zenoh/Cargo.toml").read_text())["package"]["version"]
+    assert selected_version == version("zenoh", release_kind), "query release kind and source version conflict"
     prefix = "bombay-zenoh-" + selected_version
     selected = json.loads(Path("target/package/audited-cohort.json").read_text())["bombay-zenoh"]
     assert selected["version"] == selected_version, "audited query package version changed"
@@ -102,14 +121,15 @@ def main():
             destination.write_bytes(payload)
         manifest = source / "Cargo.toml"
         candidates, candidate_arguments, candidate_custody = {}, [], {}
-        if source_profile is QuerySourceProfile.CONFIGURATION_COHORT:
+        if source_profile is not QuerySourceProfile.REGISTRY:
             ledger = json.loads(Path("target/package/audited-cohort.json").read_text())
             # Keep all extracted owning archives within this same temporary lifetime.
             dependency_root = source / "candidate-dependencies"
-            for owner in sorted(CONFIGURATION_CANDIDATES - {"zenoh"}):
+            owners = TLS_SECURITY_CANDIDATES if release_kind is ReleaseKind.TLS_SECURITY_SUCCESSOR else CONFIGURATION_CANDIDATES
+            for owner in sorted(owners - {"zenoh"}):
                 package = identity(owner)
-                candidate_prefix = package + "-" + version(owner, ReleaseKind.CONFIGURATION_SUCCESSOR)
-                assert ledger[package]["version"] == "1.10.2", "candidate ledger version changed"
+                candidate_prefix = package + "-" + version(owner, release_kind)
+                assert ledger[package]["version"] == version(owner, release_kind), "candidate ledger version changed"
                 candidate = read_archive(archives / (candidate_prefix + ".crate"), candidate_prefix, ledger[package]["checksum"])
                 directory = dependency_root / package
                 for name, payload in candidate.items():
@@ -134,8 +154,8 @@ def main():
             Path("target/package/packaged-query-candidate-resolve.stderr").write_text(resolved.stderr)
             resolved.check_returncode()
             Path("target/package/packaged-query-candidate-Cargo.lock").write_bytes((source / "Cargo.lock").read_bytes())
-            verify_candidate_lock(archive_custody["Cargo.lock"], tomllib.loads((source / "Cargo.lock").read_text()), candidates)
-            verify_query_profile(json.loads(resolved.stdout), manifest, candidates=candidates)
+            verify_candidate_lock(archive_custody["Cargo.lock"], tomllib.loads((source / "Cargo.lock").read_text()), candidates, release_kind)
+            verify_query_profile(json.loads(resolved.stdout), manifest, candidates=candidates, release_kind=release_kind)
             execution_custody["Cargo.lock"] = (source / "Cargo.lock").read_bytes()
         for profile_prefix, features, feature_arguments, query_tests in (
             ("", ("default", "transport_tls"), [], QUERY_TESTS),
@@ -147,7 +167,7 @@ def main():
             Path("target/package", "packaged-query-" + profile_prefix + "metadata.stderr").write_text(metadata.stderr)
             metadata.check_returncode()
             query_metadata = json.loads(metadata.stdout)
-            verify_query_profile(query_metadata, manifest, features, candidates)
+            verify_query_profile(query_metadata, manifest, features, candidates, release_kind)
             transport = next(package for package in query_metadata["packages"] if package["name"] == "bombay-zenoh-transport")
             transport_node = next(node for node in query_metadata["resolve"]["nodes"] if node["id"] == transport["id"])
             Path("target/package", "packaged-query-" + profile_prefix + "transport-features.json").write_text(json.dumps(transport_node, indent=2) + "\n")
@@ -167,7 +187,17 @@ def main():
                     assert all((source / name).read_bytes() == payload for name, payload in execution_custody.items()), "packaged manifest/lock custody changed"
                     assert all(path.read_bytes() == payload for path, payload in candidate_custody.items()), "candidate archive source custody changed"
         if candidates:
-            configuration = candidates["bombay-zenoh-config"]
+            configuration = candidates.get("bombay-zenoh-config")
+            if configuration is None:
+                prefix = "bombay-zenoh-config-" + version("zenoh-config", release_kind)
+                immutable = read_archive(archives / (prefix + ".crate"), prefix, published_dependencies(release_kind)["zenoh-config"])
+                directory = source / "immutable-configuration"
+                for name, payload in immutable.items():
+                    destination = directory / name
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(payload)
+                    candidate_custody[destination] = payload
+                configuration = directory / "Cargo.toml"
             corpus = Path(os.environ["BOMBAY_YAML_SOURCE_CORPUS"])
             corpus_hash = hashlib.sha256(corpus.read_bytes()).hexdigest()
             for enabled, feature_arguments, configuration_tests in (

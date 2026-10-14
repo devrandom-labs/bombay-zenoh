@@ -17,11 +17,23 @@ required_check=$(gh api "repos/$GITHUB_REPOSITORY/commits/$source_commit/check-r
   --jq '[.check_runs[] | select(.name == "Controlled TLS dependencies" and .app.id == 15368)] | sort_by(.started_at) | last | .conclusion')
 [[ "$required_check" == success ]] || { printf 'Exact source lacks required passing CI\n' >&2; exit 1; }
 
+# Refuse a historical cohort requested from a different owning source before Cargo or credentials.
+PYTHONDONTWRITEBYTECODE=1 python3 - "${RELEASE_KIND:?}" <<'PY_SOURCE'
+import sys
+import tomllib
+from pathlib import Path
+from ci.verify_archives import ReleaseKind, require, version
+require(tomllib.loads(Path("zenoh/Cargo.toml").read_text())["package"]["version"] == version("zenoh", ReleaseKind(sys.argv[1])), "release kind and owning source version conflict")
+PY_SOURCE
+
 case "${RELEASE_KIND:?}" in
   zenoh-successor) release_packages=(bombay-zenoh) ;;
   configuration-successor)
     release_packages=(bombay-zenoh-config bombay-zenoh-link-tls
       bombay-zenoh-plugin-trait bombay-zenoh-link bombay-zenoh-transport bombay-zenoh) ;;
+  tls-security-successor)
+    release_packages=(bombay-zenoh-link-commons bombay-zenoh-link-tls
+      bombay-zenoh-link bombay-zenoh-transport bombay-zenoh) ;;
   *) printf 'Unknown release kind\n' >&2; exit 1 ;;
 esac
 package_arguments=()
