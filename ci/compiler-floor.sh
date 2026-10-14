@@ -15,6 +15,11 @@ compiler_version=$(rustc --version)
 
 packages=(bombay-zenoh-config bombay-zenoh-link-tls bombay-zenoh-plugin-trait
           bombay-zenoh-link bombay-zenoh-transport bombay-zenoh)
+case "${RELEASE_KIND:-tls-security-successor}" in
+  configuration-successor) source_profile=configuration-cohort ;;
+  tls-security-successor) packages+=(bombay-zenoh-link-commons); source_profile=tls-security-cohort ;;
+  *) printf 'Unknown compiler-floor cohort\n' >&2; exit 1 ;;
+esac
 package_arguments=()
 for package in "${packages[@]}"; do
   package_arguments+=(-p "$package")
@@ -39,7 +44,7 @@ cp target/package/audited-cohort.json "$evidence/target/package/audited-cohort.j
 (
   cd "$evidence"
   python3 "$repository/ci/verify_packaged_queries.py" \
-    --source-profile configuration-cohort --archives "$archives" \
+    --source-profile "$source_profile" --archives "$archives" \
     2>&1 | tee packaged-native.log
 )
 

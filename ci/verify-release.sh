@@ -75,11 +75,24 @@ for profile in debug release; do
   done
 done
 
-# Dry-run the six exact successors together; Cargo retains their verified registry overlay.
-cargo publish --dry-run -p bombay-zenoh-config -p bombay-zenoh-link-tls \
-  -p bombay-zenoh-plugin-trait -p bombay-zenoh-link -p bombay-zenoh-transport \
-  -p bombay-zenoh --no-default-features --features transport_tls --locked --jobs 2
-python3 ci/verify_archives.py "$PWD" "$PWD/target/package/tmp-crate" "$PWD/target/package/audited-cohort.json" --release-kind configuration-successor
-PYTHONDONTWRITEBYTECODE=1 python3 ci/verify_configuration_cohort_tests.py
+# Preserve the previous exact configuration cohort alongside the new security cohort.
+release_kind="${RELEASE_KIND:-tls-security-successor}"
+case "$release_kind" in
+  configuration-successor)
+    successor_packages=(bombay-zenoh-config bombay-zenoh-link-tls
+      bombay-zenoh-plugin-trait bombay-zenoh-link bombay-zenoh-transport bombay-zenoh)
+    source_profile=configuration-cohort ;;
+  tls-security-successor)
+    successor_packages=(bombay-zenoh-link-commons bombay-zenoh-link-tls
+      bombay-zenoh-link bombay-zenoh-transport bombay-zenoh)
+    source_profile=tls-security-cohort ;;
+  *) printf 'Unknown verification cohort\n' >&2; exit 1 ;;
+esac
+successor_arguments=()
+for package in "${successor_packages[@]}"; do successor_arguments+=(-p "$package"); done
+cargo publish --dry-run "${successor_arguments[@]}" \
+  --no-default-features --features transport_tls --locked --jobs 2
+python3 ci/verify_archives.py "$PWD" "$PWD/target/package/tmp-crate" "$PWD/target/package/audited-cohort.json" --release-kind "$release_kind"
+BOMBAY_RELEASE_KIND="$release_kind" PYTHONDONTWRITEBYTECODE=1 python3 ci/verify_configuration_cohort_tests.py
 PYTHONDONTWRITEBYTECODE=1 python3 ci/verify_packaged_queries_tests.py
-BOMBAY_YAML_SOURCE_CORPUS="$PWD/DEFAULT_CONFIG.json5" PYTHONDONTWRITEBYTECODE=1 python3 ci/verify_packaged_queries.py --source-profile configuration-cohort
+BOMBAY_YAML_SOURCE_CORPUS="$PWD/DEFAULT_CONFIG.json5" PYTHONDONTWRITEBYTECODE=1 python3 ci/verify_packaged_queries.py --source-profile "$source_profile"

@@ -1,22 +1,25 @@
-"""Invert custody laws on the six actual successors and three immutable archives."""
+"""Invert custody laws on the exact selected successors and immutable archives."""
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import tomllib
 import unittest
 
 from verify_archives import (
-    CONFIGURATION_CANDIDATES, EDGES, PUBLISHED_DEPENDENCIES, ReleaseKind,
-    identity, published_owners, read_archive, verify_lock, verify_manifest, version,
+    CONFIGURATION_CANDIDATES, TLS_SECURITY_CANDIDATES, EDGES, PUBLISHED_DEPENDENCIES, ReleaseKind,
+    identity, published_dependencies, published_owners, read_archive, verify_lock, verify_manifest, version,
 )
 
 
 class ConfigurationCohortEvidence(unittest.TestCase):
     def test_actual_successor_closure_and_custody_denials(self):
-        kind = ReleaseKind.CONFIGURATION_SUCCESSOR
-        immutable = {"zenoh-link-commons", "validated_struct", "validated_struct_macros"}
+        kind = ReleaseKind(os.environ.get("BOMBAY_RELEASE_KIND", "configuration-successor"))
+        candidates = TLS_SECURITY_CANDIDATES if kind is ReleaseKind.TLS_SECURITY_SUCCESSOR else CONFIGURATION_CANDIDATES
+        immutable = {"zenoh-config", "zenoh-plugin-trait", "validated_struct", "validated_struct_macros"} if kind is ReleaseKind.TLS_SECURITY_SUCCESSOR else {"zenoh-link-commons", "validated_struct", "validated_struct_macros"}
         self.assertEqual(published_owners(kind), immutable)
+        self.assertEqual(TLS_SECURITY_CANDIDATES, {"zenoh-link-commons", "zenoh-link-tls", "zenoh-link", "zenoh-transport", "zenoh"})
         self.assertEqual(CONFIGURATION_CANDIDATES, {
             "zenoh-config", "zenoh-link-tls", "zenoh-link", "zenoh-plugin-trait",
             "zenoh-transport", "zenoh",
@@ -27,17 +30,21 @@ class ConfigurationCohortEvidence(unittest.TestCase):
         self.assertEqual(version("zenoh-config", ReleaseKind.INITIAL_COHORT), "1.10.1")
         archives = Path("target/package/tmp-crate")
         ledger = json.loads(Path("target/package/audited-cohort.json").read_text())
-        self.assertEqual(set(ledger), {identity(owner) for owner in CONFIGURATION_CANDIDATES})
+        self.assertEqual(set(ledger), {identity(owner) for owner in candidates})
         contents, checksums = {}, {}
         for owner in EDGES:
             prefix = identity(owner) + "-" + version(owner, kind)
             archive = archives / (prefix + ".crate")
-            checksum = PUBLISHED_DEPENDENCIES[owner] if owner in immutable else ledger[identity(owner)]["checksum"]
+            checksum = published_dependencies(kind)[owner] if owner in immutable else ledger[identity(owner)]["checksum"]
             self.assertEqual(hashlib.sha256(archive.read_bytes()).hexdigest(), checksum)
             contents[owner] = read_archive(archive, prefix, checksum)
+            with self.subTest(owner=owner), self.assertRaisesRegex(ValueError, "required archive checksum"):
+                read_archive(archive, prefix, None)
+            restored = read_archive(archive, prefix, checksum)
+            self.assertEqual(restored, contents[owner])
             checksums[identity(owner)] = checksum
         manifest = tomllib.loads(contents["zenoh"]["Cargo.toml"].decode())
-        for owner in CONFIGURATION_CANDIDATES:
+        for owner in candidates:
             successor = tomllib.loads(contents[owner]["Cargo.toml"].decode())
             verify_manifest(owner, successor, kind)
             for floor in (None, "1.75.0"):
@@ -49,7 +56,27 @@ class ConfigurationCohortEvidence(unittest.TestCase):
                 with self.subTest(owner=owner, floor=floor), self.assertRaisesRegex(ValueError, "verified compiler floor"):
                     verify_manifest(owner, changed, kind)
             verify_manifest(owner, successor, kind)
+        if kind is ReleaseKind.TLS_SECURITY_SUCCESSOR:
+            for owner in ("zenoh-link-commons", "zenoh-link-tls"):
+                successor = tomllib.loads(contents[owner]["Cargo.toml"].decode())
+                for minimum in (None, "0.23.45"):
+                    changed = copy.deepcopy(successor)
+                    if minimum is None:
+                        changed["dependencies"]["rustls"].pop("version")
+                    else:
+                        changed["dependencies"]["rustls"]["version"] = minimum
+                    with self.subTest(owner=owner, minimum=minimum), self.assertRaisesRegex(ValueError, "Rustls minimum"):
+                        verify_manifest(owner, changed, kind)
+                verify_manifest(owner, successor, kind)
         lock = tomllib.loads(contents["zenoh"]["Cargo.lock"].decode())
+        if kind is ReleaseKind.TLS_SECURITY_SUCCESSOR:
+            for owner in candidates:
+                successor = tomllib.loads(contents[owner]["Cargo.lock"].decode())
+                changed = copy.deepcopy(successor)
+                next(package for package in changed["package"] if package["name"] == "rustls")["version"] = "0.23.45"
+                with self.subTest(owner=owner), self.assertRaisesRegex(ValueError, "locked Rustls minimum"):
+                    verify_lock(owner, changed, checksums, kind)
+                verify_lock(owner, successor, checksums, kind)
         verify_manifest("zenoh", manifest, kind)
         verify_lock("zenoh", lock, checksums, kind)
         wrong_version = copy.deepcopy(manifest)

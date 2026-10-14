@@ -18,8 +18,8 @@ on:
         description: Exact reviewed successor closure (resume retains its original cohort)
         required: true
         type: choice
-        default: configuration-successor
-        options: [configuration-successor, zenoh-successor]
+        default: tls-security-successor
+        options: [tls-security-successor, configuration-successor, zenoh-successor]
 
 permissions:
   contents: read

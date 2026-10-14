@@ -44,18 +44,37 @@ verification passed for this release.
 
 Published `1.10.7` preserves routed query consumers at face identifier exhaustion;
 required CI, archive custody, actual publication and registry-only consumption
-have passed. Candidate `1.10.8` adds a local retained-query limit through the
-existing Config owner. Its exact six-candidate release is selected separately
-from historical top-only and initial-cohort operations: Config, TLS link, link,
-plugin trait and transport `1.10.2`, plus top `1.10.8`. Link commons `1.10.1`
-and both validated-struct `2.2.0` archives remain immutable. This candidate does
-not establish router-global, handshake, byte or executor-allocation bounds.
-No numeric default is selected. Publication remains unproved until its gates pass.
+have passed. The separately published `1.10.8` configuration cohort uses Config,
+TLS link, link, plugin trait and transport `1.10.2`; link commons `1.10.1` and
+both validated-struct `2.2.0` archives remain unchanged. Its local retained-query
+count does not establish router-global, handshake, byte or executor bounds.
 
-The six candidates declare Rust `1.88.0`; their locked source and three consumer
-profiles pass with that exact compiler. Normalized archive and required Linux
-checks remain release gates. The three unchanged support archives retain their
-original manifests. Maintainers run both pinned profiles:
+Candidate `1.10.9` corrects the two owning Rustls minima to `0.23.46` following
+RUSTSEC-2026-0346 through RUSTSEC-2026-0349. Its exact security cohort is link
+commons `1.10.2`, TLS link/link/transport `1.10.3`, and top `1.10.9`. Config/plugin
+`1.10.2` and both generator archives stay immutable. Current applications must
+select fixed Rustls in their verified lock; older SDK declarations still permit
+`0.23.45`. Local lock correction does not prove this successor published.
+
+The candidate also corrects the TLS link's cross-direction stream ownership.
+One Tokio split owns the stream, with shared exclusion during each poll and
+separate ordering of read and write operations. Pending reads therefore permit
+writes without simultaneous mutable access to the TLS connection. This removes
+the prior UnsafeCell, manual Send/Sync implementations and blocking destructor.
+Explicit close uses the owning TLS shutdown, including close_notify; abandoning
+the whole owner releases its socket and does not claim graceful shutdown.
+The existing Zenoh error source form retains original I/O causes. Private tests
+use package-local copies of the existing validated TLS fixture certificates.
+No transport, public type, dependency identity or resource default is added.
+These candidate changes require their own affected-source release/CI review;
+earlier checks on23676e6 do not establish delivery of the ownership correction.
+
+All five security candidates declare Rust `1.88.0`. Their actual source,
+normalized archives, compiler-floor checks, required CI, reviewed merge,
+publication and registry-only consumers remain delivery gates. No numeric default
+or public API change is selected by this dependency correction.
+
+Maintainers run both pinned profiles:
 
 ```sh
 nix develop -c bash ci/verify-release.sh
