@@ -659,10 +659,7 @@ validated_struct::validator! {
                 open_timeout: u64,
                 /// Timeout in milliseconds when accepting a link (default: 10000).
                 accept_timeout: u64,
-                /// Global active-establishment and accepted-queue limits, each separately (default: 100).
-                /// Dispatcher-held or reserved links and unfinished listener operations are additional.
-                /// These are separate limits across the session, not a shared total or per-listener quotas.
-                /// Zero admits no incoming transports; usize::MAX is rejected at construction.
+                /// Number of links that may stay pending during accept phase (default: 100).
                 accept_pending: usize,
                 /// Maximum number of unicast sessions (default: 1000)
                 max_sessions: usize,
