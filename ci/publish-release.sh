@@ -34,6 +34,8 @@ case "${RELEASE_KIND:?}" in
   tls-security-successor)
     release_packages=(bombay-zenoh-link-commons bombay-zenoh-link-tls
       bombay-zenoh-link bombay-zenoh-transport bombay-zenoh) ;;
+  tls-ingress-successor)
+    release_packages=(bombay-zenoh-link-tls bombay-zenoh-link bombay-zenoh-transport bombay-zenoh) ;;
   *) printf 'Unknown release kind\n' >&2; exit 1 ;;
 esac
 package_arguments=()

@@ -9,7 +9,7 @@ import subprocess
 from tempfile import TemporaryDirectory
 import tomllib
 
-from verify_archives import CONFIGURATION_CANDIDATES, TLS_SECURITY_CANDIDATES, identity, published_dependencies, read_archive, version, ReleaseKind
+from verify_archives import EDGES, identity, published_dependencies, published_owners, read_archive, version, ReleaseKind
 
 QUERY_TESTS = (
     "api::session::query_identifiers::accepted_queries_keep_their_reply_consumer_at_identifier_exhaustion",
@@ -39,14 +39,17 @@ class QuerySourceProfile(enum.Enum):
     REGISTRY = "registry"
     CONFIGURATION_COHORT = "configuration-cohort"
     TLS_SECURITY_COHORT = "tls-security-cohort"
+    TLS_INGRESS_COHORT = "tls-ingress-cohort"
 
 
 def query_release_kind(source_profile, selected_kind):
     allowed = {
         QuerySourceProfile.REGISTRY: (ReleaseKind.INITIAL_COHORT, ReleaseKind.ZENOH_SUCCESSOR,
-                                     ReleaseKind.CONFIGURATION_SUCCESSOR, ReleaseKind.TLS_SECURITY_SUCCESSOR),
+                                     ReleaseKind.CONFIGURATION_SUCCESSOR, ReleaseKind.TLS_SECURITY_SUCCESSOR,
+                                     ReleaseKind.TLS_INGRESS_SUCCESSOR),
         QuerySourceProfile.CONFIGURATION_COHORT: (ReleaseKind.CONFIGURATION_SUCCESSOR,),
         QuerySourceProfile.TLS_SECURITY_COHORT: (ReleaseKind.TLS_SECURITY_SUCCESSOR,),
+        QuerySourceProfile.TLS_INGRESS_COHORT: (ReleaseKind.TLS_INGRESS_SUCCESSOR,),
     }
     kind = allowed[source_profile][-1] if selected_kind is None else selected_kind
     assert kind in allowed[source_profile], "query source profile and release kind conflict"
@@ -72,7 +75,7 @@ def verify_query_profile(metadata, manifest, features=("default", "transport_tls
         else:
             assert package["source"] == "registry+https://github.com/rust-lang/crates.io-index", "packaged dependencies must be actual crates.io packages"
     assert observed_candidates == set(candidates), "candidate dependency closure changed"
-    if release_kind is ReleaseKind.TLS_SECURITY_SUCCESSOR:
+    if release_kind in {ReleaseKind.TLS_SECURITY_SUCCESSOR, ReleaseKind.TLS_INGRESS_SUCCESSOR}:
         rustls = [package for package in metadata["packages"] if package.get("name") == "rustls"]
         assert len(rustls) == 1 and rustls[0]["version"] == "0.23.46", "packaged Rustls minimum changed"
 
@@ -125,7 +128,7 @@ def main():
             ledger = json.loads(Path("target/package/audited-cohort.json").read_text())
             # Keep all extracted owning archives within this same temporary lifetime.
             dependency_root = source / "candidate-dependencies"
-            owners = TLS_SECURITY_CANDIDATES if release_kind is ReleaseKind.TLS_SECURITY_SUCCESSOR else CONFIGURATION_CANDIDATES
+            owners = set(EDGES) - published_owners(release_kind)
             for owner in sorted(owners - {"zenoh"}):
                 package = identity(owner)
                 candidate_prefix = package + "-" + version(owner, release_kind)

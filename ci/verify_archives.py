@@ -61,6 +61,7 @@ class ReleaseKind(enum.Enum):
     ZENOH_SUCCESSOR = "zenoh-successor"
     CONFIGURATION_SUCCESSOR = "configuration-successor"
     TLS_SECURITY_SUCCESSOR = "tls-security-successor"
+    TLS_INGRESS_SUCCESSOR = "tls-ingress-successor"
 
 
 CONFIGURATION_CANDIDATES = {
@@ -76,6 +77,11 @@ TLS_SECURITY_PUBLISHED_DEPENDENCIES = {
     "zenoh-plugin-trait": "73944481527b2994cfc6acc29410c556ba65bce16b5cba32d1bba6b3e2edf503",
     "validated_struct": "b1b9764c93caf9628a9c391a92132f1bc84a8816b01ff486cc18b08101e2c3c7",
     "validated_struct_macros": "602d3538d65be50613f90d69dd21c504d4e894ae2ae13c41ba89163fd4b33b55",
+}
+
+TLS_INGRESS_CANDIDATES = TLS_SECURITY_CANDIDATES - {"zenoh-link-commons"}
+TLS_INGRESS_PUBLISHED_DEPENDENCIES = TLS_SECURITY_PUBLISHED_DEPENDENCIES | {
+    "zenoh-link-commons": "06a8038115ba3509474f73b15bafa7a932ecacee0863ac22de40be5700b69a2c",
 }
 
 
@@ -102,16 +108,22 @@ def identity(owner):
 
 
 def published_dependencies(release_kind):
+    if release_kind is ReleaseKind.TLS_INGRESS_SUCCESSOR:
+        return TLS_INGRESS_PUBLISHED_DEPENDENCIES
     return TLS_SECURITY_PUBLISHED_DEPENDENCIES if release_kind is ReleaseKind.TLS_SECURITY_SUCCESSOR else PUBLISHED_DEPENDENCIES
 
 
 def published_revision(owner, release_kind):
-    if release_kind is ReleaseKind.TLS_SECURITY_SUCCESSOR and owner in {"zenoh-config", "zenoh-plugin-trait"}:
+    if release_kind is ReleaseKind.TLS_INGRESS_SUCCESSOR and owner == "zenoh-link-commons":
+        return "1ea4bd160b98f5ef994064378066cd2efd081e26"
+    if release_kind in {ReleaseKind.TLS_SECURITY_SUCCESSOR, ReleaseKind.TLS_INGRESS_SUCCESSOR} and owner in {"zenoh-config", "zenoh-plugin-trait"}:
         return TLS_SECURITY_PUBLISHED_REVISION
     return PUBLISHED_REVISION
 
 
 def published_owners(release_kind):
+    if release_kind is ReleaseKind.TLS_INGRESS_SUCCESSOR:
+        return set(EDGES) - TLS_INGRESS_CANDIDATES
     if release_kind is ReleaseKind.TLS_SECURITY_SUCCESSOR:
         return set(EDGES) - TLS_SECURITY_CANDIDATES
     if release_kind is ReleaseKind.CONFIGURATION_SUCCESSOR:
@@ -122,6 +134,10 @@ def published_owners(release_kind):
 
 
 def version(owner, release_kind=ReleaseKind.INITIAL_COHORT):
+    if release_kind is ReleaseKind.TLS_INGRESS_SUCCESSOR:
+        if owner in TLS_INGRESS_CANDIDATES:
+            return "1.10.10" if owner == "zenoh" else "1.10.4"
+        return version(owner, ReleaseKind.TLS_SECURITY_SUCCESSOR)
     if release_kind is ReleaseKind.TLS_SECURITY_SUCCESSOR:
         return {"zenoh": "1.10.9", "zenoh-link-commons": "1.10.2", "zenoh-link-tls": "1.10.3",
                 "zenoh-link": "1.10.3", "zenoh-transport": "1.10.3", "zenoh-config": "1.10.2",
@@ -147,10 +163,10 @@ def verify_manifest(owner, manifest, release_kind=ReleaseKind.INITIAL_COHORT):
     require(package["repository"] == CONTROLLED_REPOSITORY, f"{owner}: repository")
     require(package["license"] == "EPL-2.0 OR Apache-2.0", f"{owner}: license expression")
     if (release_kind is ReleaseKind.CONFIGURATION_SUCCESSOR and owner in CONFIGURATION_CANDIDATES
-            or release_kind is ReleaseKind.TLS_SECURITY_SUCCESSOR and owner in TLS_SECURITY_CANDIDATES):
+            or release_kind in {ReleaseKind.TLS_SECURITY_SUCCESSOR, ReleaseKind.TLS_INGRESS_SUCCESSOR} and owner in TLS_SECURITY_CANDIDATES):
         require(package.get("rust-version") == "1.88.0", f"{owner}: verified compiler floor")
     if owner in {"zenoh-link-commons", "zenoh-link-tls"}:
-        minimum = "0.23.46" if release_kind is ReleaseKind.TLS_SECURITY_SUCCESSOR else "0.23.45"
+        minimum = "0.23.46" if release_kind in {ReleaseKind.TLS_SECURITY_SUCCESSOR, ReleaseKind.TLS_INGRESS_SUCCESSOR} else "0.23.45"
         require(manifest["dependencies"].get("rustls", {}).get("version") == minimum, f"{owner}: Rustls minimum")
     provenance = package["metadata"]["bombay"]
     if owner in ZENOH_OWNERS:
@@ -166,6 +182,8 @@ def verify_manifest(owner, manifest, release_kind=ReleaseKind.INITIAL_COHORT):
     for alias, specification in dependency_tables(manifest):
         require(not {"path", "git"}.intersection(specification), f"{owner}: nonregistry edge {alias}")
         selected = specification.get("package", alias)
+        if release_kind is ReleaseKind.TLS_INGRESS_SUCCESSOR:
+            require(selected != "tls-listener", f"{owner}: retired listener dependency")
         require(selected not in EDGES, f"{owner}: original dependency edge {alias} -> {selected}")
         if selected.startswith("bombay-"):
             require(alias in EDGES[owner], f"{owner}: unexpected corrected edge {alias}")
@@ -252,11 +270,13 @@ def verify_lock(owner, lock, checksums, release_kind=ReleaseKind.INITIAL_COHORT)
     require(source_names == [identity(owner)], f"{owner}: locked owning source node")
     controlled_names = {identity(dependency): dependency for dependency in EDGES}
     edges = []
-    if release_kind is ReleaseKind.TLS_SECURITY_SUCCESSOR and owner in TLS_SECURITY_CANDIDATES:
+    if release_kind in {ReleaseKind.TLS_SECURITY_SUCCESSOR, ReleaseKind.TLS_INGRESS_SUCCESSOR} and owner in TLS_SECURITY_CANDIDATES:
         rustls = [package for package in lock["package"] if package["name"] == "rustls"]
         require(len(rustls) == 1 and rustls[0]["version"] == "0.23.46", f"{owner}: locked Rustls minimum")
     for package in lock["package"]:
         name = package["name"]
+        if release_kind is ReleaseKind.TLS_INGRESS_SUCCESSOR:
+            require(name != "tls-listener", f"{owner}: retired locked listener")
         require(name not in EDGES, f"{owner}: original locked dependency {name}")
         if not name.startswith("bombay-"):
             continue

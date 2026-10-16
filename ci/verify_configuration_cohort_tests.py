@@ -14,10 +14,25 @@ from verify_archives import (
 
 
 class ConfigurationCohortEvidence(unittest.TestCase):
+    def test_ingress_successor_preserves_exact_candidate_versions(self):
+        if os.environ.get("BOMBAY_RELEASE_KIND") != "tls-ingress-successor":
+            self.skipTest("requires the incoming TLS successor selection")
+        ledger = json.loads(Path("target/package/audited-cohort.json").read_text())
+        versions = {name: archive["version"] for name, archive in ledger.items()}
+        self.assertEqual(versions, {
+            "bombay-zenoh-link-tls": "1.10.4",
+            "bombay-zenoh-link": "1.10.4",
+            "bombay-zenoh-transport": "1.10.4",
+            "bombay-zenoh": "1.10.10",
+        })
+
     def test_actual_successor_closure_and_custody_denials(self):
         kind = ReleaseKind(os.environ.get("BOMBAY_RELEASE_KIND", "configuration-successor"))
         candidates = TLS_SECURITY_CANDIDATES if kind is ReleaseKind.TLS_SECURITY_SUCCESSOR else CONFIGURATION_CANDIDATES
         immutable = {"zenoh-config", "zenoh-plugin-trait", "validated_struct", "validated_struct_macros"} if kind is ReleaseKind.TLS_SECURITY_SUCCESSOR else {"zenoh-link-commons", "validated_struct", "validated_struct_macros"}
+        if kind is ReleaseKind.TLS_INGRESS_SUCCESSOR:
+            immutable = {"zenoh-config", "zenoh-plugin-trait", "zenoh-link-commons", "validated_struct", "validated_struct_macros"}
+            candidates = set(EDGES) - immutable
         self.assertEqual(published_owners(kind), immutable)
         self.assertEqual(TLS_SECURITY_CANDIDATES, {"zenoh-link-commons", "zenoh-link-tls", "zenoh-link", "zenoh-transport", "zenoh"})
         self.assertEqual(CONFIGURATION_CANDIDATES, {
@@ -56,7 +71,7 @@ class ConfigurationCohortEvidence(unittest.TestCase):
                 with self.subTest(owner=owner, floor=floor), self.assertRaisesRegex(ValueError, "verified compiler floor"):
                     verify_manifest(owner, changed, kind)
             verify_manifest(owner, successor, kind)
-        if kind is ReleaseKind.TLS_SECURITY_SUCCESSOR:
+        if kind in {ReleaseKind.TLS_SECURITY_SUCCESSOR, ReleaseKind.TLS_INGRESS_SUCCESSOR}:
             for owner in ("zenoh-link-commons", "zenoh-link-tls"):
                 successor = tomllib.loads(contents[owner]["Cargo.toml"].decode())
                 for minimum in (None, "0.23.45"):
@@ -69,7 +84,7 @@ class ConfigurationCohortEvidence(unittest.TestCase):
                         verify_manifest(owner, changed, kind)
                 verify_manifest(owner, successor, kind)
         lock = tomllib.loads(contents["zenoh"]["Cargo.lock"].decode())
-        if kind is ReleaseKind.TLS_SECURITY_SUCCESSOR:
+        if kind in {ReleaseKind.TLS_SECURITY_SUCCESSOR, ReleaseKind.TLS_INGRESS_SUCCESSOR}:
             for owner in candidates:
                 successor = tomllib.loads(contents[owner]["Cargo.lock"].decode())
                 changed = copy.deepcopy(successor)
@@ -77,6 +92,22 @@ class ConfigurationCohortEvidence(unittest.TestCase):
                 with self.subTest(owner=owner), self.assertRaisesRegex(ValueError, "locked Rustls minimum"):
                     verify_lock(owner, changed, checksums, kind)
                 verify_lock(owner, successor, checksums, kind)
+        if kind is ReleaseKind.TLS_INGRESS_SUCCESSOR:
+            for owner in EDGES:
+                successor = tomllib.loads(contents[owner]["Cargo.toml"].decode())
+                for alias in ("tls-listener", "retired-listener"):
+                    changed = copy.deepcopy(successor)
+                    changed.setdefault("dependencies", {})[alias] = {"package": "tls-listener", "version": "0.11.2"}
+                    with self.subTest(owner=owner, alias=alias), self.assertRaisesRegex(ValueError, "retired listener dependency"):
+                        verify_manifest(owner, changed, kind)
+                verify_manifest(owner, successor, kind)
+                successor_lock = tomllib.loads(contents[owner]["Cargo.lock"].decode())
+                changed = copy.deepcopy(successor_lock)
+                changed["package"].append({"name": "tls-listener", "version": "0.11.2",
+                                           "source": "registry+https://github.com/rust-lang/crates.io-index"})
+                with self.subTest(owner=owner), self.assertRaisesRegex(ValueError, "retired locked listener"):
+                    verify_lock(owner, changed, checksums, kind)
+                verify_lock(owner, successor_lock, checksums, kind)
         verify_manifest("zenoh", manifest, kind)
         verify_lock("zenoh", lock, checksums, kind)
         wrong_version = copy.deepcopy(manifest)

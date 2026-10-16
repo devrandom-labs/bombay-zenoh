@@ -25,7 +25,7 @@ and identity policies belong to the Bombay integration.
 The currently verified published dependency spelling is:
 
 ```toml
-zenoh = { package = "bombay-zenoh", version = "=1.10.8", default-features = false, features = ["transport_tls"] }
+zenoh = { package = "bombay-zenoh", version = "=1.10.9", default-features = false, features = ["transport_tls"] }
 ```
 
 Local package verification is a release rehearsal; it does not establish
@@ -35,15 +35,17 @@ references describe its wider profile: [Eclipse Zenoh](https://zenoh.io/) and
 The controlled source and package-release history belong to
 [devrandom-labs/bombay-zenoh](https://github.com/devrandom-labs/bombay-zenoh).
 
-The published `1.10.8` graph still declares Rustls `0.23.45` as its minimum.
-Applications must select fixed Rustls `0.23.46` or newer in a verified lock.
-Candidate `1.10.9` raises both owning TLS dependency minima to `0.23.46` without
-new SDK Rust code, features or public APIs. Its exact five-package successor
-includes link commons `1.10.2` and TLS link/link/transport `1.10.3`; Config/plugin
-`1.10.2` and both validated-struct `2.2.0` archives remain unchanged.
-The five candidates declare Rust `1.88.0`; actual source/archive/floor checks,
+Published `1.10.9` requires Rustls `0.23.46` in both owning TLS dependencies.
+Its exact cohort includes link commons `1.10.2`, TLS link/link/transport `1.10.3`,
+Config/plugin `1.10.2` and both validated-struct `2.2.0` archives.
+
+Candidate `1.10.10` delivers the merged TLS stream ownership, sequential incoming
+handshake and bounded accepted-link queue corrections through TLS link, link and
+transport `1.10.4`. It removes the unused listener dependency. The five remaining
+controlled archives keep their exact published bytes and source revisions.
+The four candidates declare Rust `1.88.0`; source/archive/compiler-floor checks,
 required CI, reviewed merge, publication and registry-only consumption remain
-gates. Preparing candidate source does not establish registry availability.
+gates. These corrections do not establish whole-memory or executor-task bounds.
 
 Published `1.10.2` corrects resource registration for valid leading UTF-8 path
 chunks. Published `1.10.3` retires finalized/disconnected native interest resources

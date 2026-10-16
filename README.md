@@ -49,30 +49,31 @@ TLS link, link, plugin trait and transport `1.10.2`; link commons `1.10.1` and
 both validated-struct `2.2.0` archives remain unchanged. Its local retained-query
 count does not establish router-global, handshake, byte or executor bounds.
 
-Candidate `1.10.9` corrects the two owning Rustls minima to `0.23.46` following
-RUSTSEC-2026-0346 through RUSTSEC-2026-0349. Its exact security cohort is link
-commons `1.10.2`, TLS link/link/transport `1.10.3`, and top `1.10.9`. Config/plugin
-`1.10.2` and both generator archives stay immutable. Current applications must
-select fixed Rustls in their verified lock; older SDK declarations still permit
-`0.23.45`. Local lock correction does not prove this successor published.
+Published `1.10.9` raises both owning Rustls minima to `0.23.46`; its support
+cohort is link commons `1.10.2` and TLS link/link/transport `1.10.3`, retaining
+Config/plugin `1.10.2` and both validated-struct `2.2.0` archives.
 
-The candidate also corrects the TLS link's cross-direction stream ownership.
-One Tokio split owns the stream, with shared exclusion during each poll and
-separate ordering of read and write operations. Pending reads therefore permit
-writes without simultaneous mutable access to the TLS connection. This removes
-the prior UnsafeCell, manual Send/Sync implementations and blocking destructor.
-Explicit close uses the owning TLS shutdown, including close_notify; abandoning
-the whole owner releases its socket and does not claim graceful shutdown.
-The existing Zenoh error source form retains original I/O causes. Private tests
-use package-local copies of the existing validated TLS fixture certificates.
-No transport, public type, dependency identity or resource default is added.
-These candidate changes require their own affected-source release/CI review;
-earlier checks on23676e6 do not establish delivery of the ownership correction.
+Candidate `1.10.10` carries the merged TLS ownership, incoming handshake and
+accepted-link queue corrections. Its four new packages are TLS link, link and
+transport `1.10.4`, followed by top `1.10.10`. The five other controlled archives
+retain their published bytes, checksums and owning source revisions. The unused
+`tls-listener` dependency is removed from the candidate manifests and locks;
+its shared dependencies retain their independent owners.
 
-All five security candidates declare Rust `1.88.0`. Their actual source,
-normalized archives, compiler-floor checks, required CI, reviewed merge,
-publication and registry-only consumers remain delivery gates. No numeric default
-or public API change is selected by this dependency correction.
+One Tokio split owns each TLS stream, with shared exclusion during each poll and
+separate read/write ordering. Pending reads permit writes without simultaneous
+mutable access to the TLS connection. Explicit close uses TLS shutdown, including
+close_notify; abandoning the owner releases its socket without claiming graceful
+shutdown. Incoming handshakes are sequential within each listener; accepted links
+use the existing bounded channel and retain capacity through rejected-link close.
+These counts do not establish a whole-memory, byte or executor-task quota.
+
+The four candidates declare Rust `1.88.0`. Their own source/archive/compiler-floor
+checks, required CI, reviewed merge, guarded publication and clean registry-only
+consumption remain delivery gates. Merged source alone is not a published release.
+No runtime Rust code, public type, feature or resource default changes in this
+release-selection patch. Historical release kinds and partial-publication custody
+remain available from their exact owning source.
 
 Maintainers run both pinned profiles:
 
