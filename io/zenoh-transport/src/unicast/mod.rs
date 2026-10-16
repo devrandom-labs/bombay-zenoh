@@ -16,6 +16,8 @@ pub mod establishment;
 pub(crate) mod link;
 pub(crate) mod lowlatency;
 pub(crate) mod manager;
+#[cfg(all(test, feature = "test", feature = "transport_tls"))]
+mod queue;
 #[cfg(feature = "test")]
 pub mod test_helpers;
 pub(crate) mod transport_unicast_inner;

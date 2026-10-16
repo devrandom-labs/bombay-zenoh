@@ -562,7 +562,10 @@
       open_timeout: 10000,
       /// Timeout in milliseconds when accepting a link
       accept_timeout: 10000,
-      /// Maximum number of links in pending state while performing the handshake for accepting it
+      /// Global active-establishment and accepted-queue limits, each separately.
+      /// Dispatcher-held or reserved links and unfinished listener operations are additional.
+      /// These are separate limits across the session, not a shared total or per-listener quotas.
+      /// Zero admits no incoming transports; usize::MAX is rejected at construction.
       accept_pending: 100,
       /// Maximum number of transports that can be simultaneously alive for a single zenoh session
       max_sessions: 1000,

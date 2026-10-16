@@ -11,6 +11,9 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
+#[path = "fixtures/deliveries.rs"]
+mod deliveries;
+
 use std::{
     any::Any,
     collections::HashSet,
@@ -23,6 +26,7 @@ use std::{
     time::Duration,
 };
 
+use deliveries::Deliveries;
 use zenoh_core::ztimeout;
 use zenoh_link::Link;
 use zenoh_protocol::{
@@ -30,7 +34,13 @@ use zenoh_protocol::{
     network::{push::ext::QoSType, NetworkMessage, NetworkMessageMut, Push},
 };
 use zenoh_result::ZResult;
-use zenoh_test::{get_free_tcp_port, get_free_udp_port};
+use zenoh_test::get_free_tcp_port;
+#[cfg(any(
+    feature = "transport_udp",
+    feature = "transport_quic",
+    feature = "transport_quic_datagram"
+))]
+use zenoh_test::get_free_udp_port;
 use zenoh_transport::{
     multicast::TransportMulticast,
     unicast::{test_helpers::make_transport_manager_builder, TransportUnicast},
@@ -267,70 +277,6 @@ const MSG_SIZE_NOFRAG: [usize; 1] = [1_024];
 ))]
 const MSG_SIZE_LOWLATENCY: [usize; 1] = MSG_SIZE_NOFRAG;
 
-// Transport Handler for the router
-struct SHRouter {
-    count: Arc<AtomicUsize>,
-}
-
-impl Default for SHRouter {
-    fn default() -> Self {
-        Self {
-            count: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-}
-
-impl SHRouter {
-    fn get_count(&self) -> usize {
-        self.count.load(Ordering::SeqCst)
-    }
-}
-
-impl TransportEventHandler for SHRouter {
-    fn new_unicast(
-        &self,
-        _peer: TransportPeer,
-        _transport: TransportUnicast,
-    ) -> ZResult<Arc<dyn TransportPeerEventHandler>> {
-        let arc = Arc::new(SCRouter::new(self.count.clone()));
-        Ok(arc)
-    }
-
-    fn new_multicast(
-        &self,
-        _transport: TransportMulticast,
-    ) -> ZResult<Arc<dyn TransportMulticastEventHandler>> {
-        panic!();
-    }
-}
-
-// Transport Callback for the router
-#[derive(Debug)]
-pub struct SCRouter {
-    count: Arc<AtomicUsize>,
-}
-
-impl SCRouter {
-    pub fn new(count: Arc<AtomicUsize>) -> Self {
-        Self { count }
-    }
-}
-
-impl TransportPeerEventHandler for SCRouter {
-    fn handle_message(&self, _message: NetworkMessageMut) -> ZResult<()> {
-        self.count.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-
-    fn new_link(&self, _link: Link) {}
-    fn del_link(&self, _link: Link) {}
-    fn closed(&self) {}
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
 // Transport Handler for the client
 #[derive(Default)]
 struct SHClient;
@@ -378,7 +324,7 @@ async fn open_transport_unicast(
     #[cfg(feature = "transport_multilink")] max_client_links: usize,
 ) -> (
     TransportManager,
-    Arc<SHRouter>,
+    Arc<Deliveries>,
     TransportManager,
     TransportUnicast,
 ) {
@@ -387,7 +333,7 @@ async fn open_transport_unicast(
     let router_id = ZenohIdProto::try_from([2]).unwrap();
 
     // Create the router transport manager
-    let router_handler = Arc::new(SHRouter::default());
+    let router_handler = Arc::new(Deliveries::default());
     let unicast = make_transport_manager_builder(
         #[cfg(feature = "transport_multilink")]
         max_router_links,
@@ -480,7 +426,7 @@ async fn close_transport(
 }
 
 async fn test_transport(
-    router_handler: Arc<SHRouter>,
+    router_handler: Arc<Deliveries>,
     client_transport: TransportUnicast,
     channel: Channel,
     msg_size: usize,
@@ -602,6 +548,13 @@ async fn run_with_universal_transport(
     run_internal(client_endpoints, server_endpoints, channel, msg_size, false).await;
 }
 
+#[cfg(any(
+    feature = "transport_tcp",
+    feature = "transport_udp",
+    all(feature = "transport_unixsock-stream", target_family = "unix"),
+    feature = "transport_ws",
+    feature = "transport_unixpipe"
+))]
 async fn run_with_lowlatency_transport(
     client_endpoints: &[EndPoint],
     server_endpoints: &[EndPoint],
@@ -1909,10 +1862,12 @@ async fn transport_unicast_quic_datagram_only_server() {
 }
 
 // Transport Handler for multi-rx test server
+#[cfg(any(feature = "transport_quic", feature = "transport_udp"))]
 struct MultiRxHandler {
     callback: Arc<MultiRxCallback>,
 }
 
+#[cfg(any(feature = "transport_quic", feature = "transport_udp"))]
 impl Default for MultiRxHandler {
     fn default() -> Self {
         Self {
@@ -1921,6 +1876,7 @@ impl Default for MultiRxHandler {
     }
 }
 
+#[cfg(any(feature = "transport_quic", feature = "transport_udp"))]
 impl TransportEventHandler for MultiRxHandler {
     fn new_unicast(
         &self,
@@ -1963,6 +1919,7 @@ impl TransportPeerEventHandler for MultiRxCallback {
     }
 }
 
+#[cfg(any(feature = "transport_quic", feature = "transport_udp"))]
 async fn open_transport_unicast_multi_rx_tests(
     client_endpoints: &[EndPoint],
     server_endpoints: &[EndPoint],
@@ -2876,6 +2833,7 @@ async fn transport_unicast_mixedrel_quic_auto_explicit() {
     );
 }
 
+#[cfg(any(feature = "transport_quic", feature = "transport_udp"))]
 async fn run_multistream_test(
     client_endpoints: &[EndPoint],
     server_endpoints: &[EndPoint],
@@ -2908,6 +2866,7 @@ async fn run_multistream_test(
     result
 }
 
+#[cfg(any(feature = "transport_quic", feature = "transport_udp"))]
 async fn run_mixed_reliability_test(
     client_endpoints: &[EndPoint],
     server_endpoints: &[EndPoint],
@@ -2941,6 +2900,7 @@ async fn run_mixed_reliability_test(
 }
 
 /// checks if two messages are handled by different RX tasks.
+#[cfg(any(feature = "transport_quic", feature = "transport_udp"))]
 async fn test_multi_rx_transport(
     router_handler: Arc<MultiRxHandler>,
     client_transport: TransportUnicast,
@@ -2998,7 +2958,7 @@ async fn transport_unicast_with_zid_matching() {
     let client_id = ZenohIdProto::try_from([1]).unwrap();
     let router_id = ZenohIdProto::try_from([2]).unwrap();
 
-    let router_handler = Arc::new(SHRouter::default());
+    let router_handler = Arc::new(Deliveries::default());
     let unicast = make_transport_manager_builder(
         #[cfg(feature = "transport_multilink")]
         1,
@@ -3056,7 +3016,7 @@ async fn transport_unicast_with_zid_mismatch() {
     let router_id = ZenohIdProto::try_from([2]).unwrap();
     let wrong_zid = ZenohIdProto::try_from([99]).unwrap();
 
-    let router_handler = Arc::new(SHRouter::default());
+    let router_handler = Arc::new(Deliveries::default());
     let unicast = make_transport_manager_builder(
         #[cfg(feature = "transport_multilink")]
         1,
@@ -3111,7 +3071,7 @@ async fn transport_unicast_with_zid_multilink() {
     let client_id = ZenohIdProto::try_from([1]).unwrap();
     let router_id = ZenohIdProto::try_from([2]).unwrap();
 
-    let router_handler = Arc::new(SHRouter::default());
+    let router_handler = Arc::new(Deliveries::default());
     let unicast = make_transport_manager_builder(2, false);
     let router_manager = TransportManager::builder()
         .zid(router_id)
@@ -3313,4 +3273,438 @@ async fn transport_unicast_close_link_lowlatency() {
     ztimeout!(router_manager.del_listener(&endpoint)).unwrap();
     ztimeout!(router_manager.close());
     ztimeout!(client_manager.close());
+}
+
+#[cfg(all(feature = "transport_tls", target_family = "unix"))]
+use std::{
+    future::{poll_fn, Future},
+    io::{Cursor, Error as IoError, ErrorKind},
+    task::Poll,
+};
+#[cfg(all(feature = "transport_tls", target_family = "unix"))]
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    task::yield_now,
+    time::{timeout, Instant},
+};
+#[cfg(all(feature = "transport_tls", target_family = "unix"))]
+use tokio_rustls::rustls::{
+    pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, ServerName},
+    version::TLS13,
+    ClientConfig, ClientConnection, ProtocolVersion, RootCertStore,
+};
+#[cfg(all(feature = "transport_tls", target_family = "unix"))]
+use zenoh_link_commons::tls::config::{
+    TLS_CONNECT_CERTIFICATE_RAW, TLS_CONNECT_PRIVATE_KEY_RAW, TLS_ENABLE_MTLS,
+    TLS_HANDSHAKE_TIMEOUT_MS, TLS_LISTEN_CERTIFICATE_RAW, TLS_LISTEN_PRIVATE_KEY_RAW,
+    TLS_ROOT_CA_CERTIFICATE_RAW, TLS_USE_PUBLIC_PKI, TLS_VERIFY_NAME_ON_CONNECT,
+};
+
+#[cfg(all(feature = "transport_tls", target_family = "unix"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn peer_tls_pressure_preserves_live_traffic_and_fresh_open() {
+    observe_transport_pressure(WhatAmI::Peer, WhatAmI::Peer).await;
+}
+
+#[cfg(all(feature = "transport_tls", target_family = "unix"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn router_tls_pressure_preserves_live_client_traffic_and_fresh_open() {
+    observe_transport_pressure(WhatAmI::Router, WhatAmI::Client).await;
+}
+
+#[cfg(all(feature = "transport_tls", target_family = "unix"))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one native pressure and complete cleanup trace"
+)]
+async fn observe_transport_pressure(listener_role: WhatAmI, caller_role: WhatAmI) {
+    const OPEN_WAIT: Duration = Duration::from_millis(500);
+    const IO_WAIT: Duration = Duration::from_secs(5);
+    const HANDSHAKE_WAIT: Duration = Duration::from_secs(10);
+    timeout(Duration::from_secs(30), async {
+        let listener_id = ZenohIdProto::try_from([1]).unwrap();
+        let live_id = ZenohIdProto::try_from([2]).unwrap();
+        let retry_id = ZenohIdProto::try_from([3]).unwrap();
+        let received = Arc::new(Deliveries::default());
+        let listener = TransportManager::builder()
+            .zid(listener_id)
+            .whatami(listener_role)
+            .unicast(
+                TransportManager::config_unicast()
+                    .open_timeout(OPEN_WAIT)
+                    .max_sessions(4),
+            )
+            .build_test(received.clone())
+            .unwrap();
+        let live = TransportManager::builder()
+            .zid(live_id)
+            .whatami(caller_role)
+            .unicast(
+                TransportManager::config_unicast()
+                    .open_timeout(OPEN_WAIT)
+                    .max_sessions(4),
+            )
+            .build_test(Arc::new(SHClient))
+            .unwrap();
+        let retry = TransportManager::builder()
+            .zid(retry_id)
+            .whatami(caller_role)
+            .unicast(
+                TransportManager::config_unicast()
+                    .open_timeout(OPEN_WAIT)
+                    .max_sessions(4),
+            )
+            .build_test(Arc::new(SHClient))
+            .unwrap();
+        let mut supplied: EndPoint = "tls/localhost:0".parse().unwrap();
+        supplied
+            .config_mut()
+            .extend_from_iter(
+                [
+                    (TLS_ROOT_CA_CERTIFICATE_RAW, CLIENT_CA),
+                    (TLS_LISTEN_CERTIFICATE_RAW, SERVER_CERT),
+                    (TLS_LISTEN_PRIVATE_KEY_RAW, SERVER_KEY),
+                    (TLS_ENABLE_MTLS, "true"),
+                    (TLS_USE_PUBLIC_PKI, "false"),
+                    (TLS_HANDSHAKE_TIMEOUT_MS, "10000"),
+                ]
+                .into_iter(),
+            )
+            .unwrap();
+        let bound = timeout(IO_WAIT, listener.add_listener(supplied.clone()))
+            .await
+            .expect("listener guard")
+            .expect("actual TLS listener");
+        let listening = EndPoint::new(
+            bound.protocol(),
+            bound.address(),
+            bound.metadata(),
+            supplied.config(),
+        )
+        .unwrap();
+        let mut endpoint = EndPoint::from(bound.clone());
+        endpoint
+            .config_mut()
+            .extend_from_iter(
+                [
+                    (TLS_ROOT_CA_CERTIFICATE_RAW, SERVER_CA),
+                    (TLS_CONNECT_CERTIFICATE_RAW, CLIENT_CERT),
+                    (TLS_CONNECT_PRIVATE_KEY_RAW, CLIENT_KEY),
+                    (TLS_ENABLE_MTLS, "true"),
+                    (TLS_USE_PUBLIC_PKI, "false"),
+                    (TLS_VERIFY_NAME_ON_CONNECT, "true"),
+                ]
+                .into_iter(),
+            )
+            .unwrap();
+        let established = timeout(IO_WAIT, live.open_transport_unicast(endpoint.clone()))
+            .await
+            .expect("initial native open guard")
+            .expect("actual live native transport");
+        let initial_membership = timeout(IO_WAIT, async {
+            while listener.get_transports_unicast().await.len() != 1 {
+                yield_now().await;
+            }
+        })
+        .await;
+        let mut roots = RootCertStore::empty();
+        for original in CertificateDer::pem_slice_iter(SERVER_CA.as_bytes()) {
+            roots.add(original.unwrap()).unwrap();
+        }
+        let certificates = CertificateDer::pem_slice_iter(CLIENT_CERT.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let key = PrivateKeyDer::from_pem_slice(CLIENT_KEY.as_bytes()).unwrap();
+        let configuration = ClientConfig::builder_with_protocol_versions(&[&TLS13])
+            .with_root_certificates(roots)
+            .with_client_auth_cert(certificates, key)
+            .unwrap();
+        let mut held_tls = ClientConnection::new(
+            Arc::new(configuration),
+            ServerName::try_from("localhost").unwrap(),
+        )
+        .unwrap();
+        let first_started = Instant::now();
+        let mut held_peer = timeout(IO_WAIT, TcpStream::connect(bound.address().as_str()))
+            .await
+            .expect("held TCP connect guard")
+            .expect("actual held TCP peer");
+        let mut hello = Vec::new();
+        let hello_length = held_tls.write_tls(&mut hello);
+        let hello_sent = timeout(IO_WAIT, held_peer.write_all(&hello)).await;
+        let mut flights = Vec::new();
+        let mut parsed = Vec::new();
+        let first_flight = timeout(IO_WAIT, async {
+            while held_tls.is_handshaking() {
+                let mut header = [0_u8; 5];
+                held_peer.read_exact(&mut header).await?;
+                let size = usize::from(u16::from_be_bytes([header[3], header[4]]));
+                let mut flight = Vec::from(header);
+                flight.resize(5 + size, 0);
+                held_peer.read_exact(&mut flight[5..]).await?;
+                held_tls.read_tls(&mut Cursor::new(&flight))?;
+                flights.push(flight);
+                match held_tls.process_new_packets() {
+                    Ok(original) => parsed.push(Ok(original)),
+                    Err(original) => {
+                        parsed.push(Err(original));
+                        break;
+                    }
+                }
+            }
+            Ok::<(), IoError>(())
+        })
+        .await;
+        // Actual client authentication/Finished is queued, never written.
+        let pressured_started = Instant::now();
+        let mut pressured = None;
+        let first_poll;
+        let scheduled;
+        let traffic;
+        let traffic_elapsed;
+        {
+            let mut opening = Box::pin(retry.open_transport_unicast(endpoint.clone()));
+            first_poll = poll_fn(|context| {
+                Poll::Ready(match opening.as_mut().poll(context) {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(original) => {
+                        pressured = Some(original);
+                        Poll::Ready(())
+                    }
+                })
+            })
+            .await;
+            let mut message = NetworkMessage::from(Push {
+                wire_expr: "pressure/live".into(),
+                ext_qos: QoSType::new(Priority::default(), CongestionControl::Block, false),
+                ..Push::from(vec![19_u8])
+            });
+            message.reliability = Reliability::Reliable;
+            scheduled = established.schedule(message.as_mut());
+            traffic = timeout(IO_WAIT, async {
+                while received.get_count() != 1 {
+                    yield_now().await;
+                }
+            })
+            .await;
+            traffic_elapsed = pressured_started.elapsed();
+            if pressured.is_none() {
+                poll_fn(|context| match opening.as_mut().poll(context) {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(original) => {
+                        pressured = Some(original);
+                        Poll::Ready(())
+                    }
+                })
+                .await;
+            }
+        }
+        let pressured_elapsed = pressured_started.elapsed();
+        let pressure_peer = match pressured.as_ref().unwrap() {
+            Ok(transport) => Some(transport.get_peer()),
+            Err(_) => None,
+        };
+        let expected_members = match pressured.as_ref().unwrap() {
+            Ok(_) => 2,
+            Err(_) => 1,
+        };
+        let membership_guard = timeout(IO_WAIT, async {
+            while listener.get_transports_unicast().await.len() != expected_members {
+                yield_now().await;
+            }
+        })
+        .await;
+        let listener_held = listener
+            .get_transports_unicast()
+            .await
+            .into_iter()
+            .map(|transport| transport.get_peer())
+            .collect::<Vec<_>>();
+        let live_held = live
+            .get_transports_unicast()
+            .await
+            .into_iter()
+            .map(|transport| transport.get_peer())
+            .collect::<Vec<_>>();
+        let retry_held = retry
+            .get_transports_unicast()
+            .await
+            .into_iter()
+            .map(|transport| transport.get_peer())
+            .collect::<Vec<_>>();
+        let mut unread = [0_u8; 1];
+        let first_open = held_peer.try_read(&mut unread);
+        let held_for = first_started.elapsed();
+        let pressure_close = match pressured.as_ref().unwrap() {
+            Ok(transport) => Some(timeout(IO_WAIT, transport.close()).await),
+            Err(_) => None,
+        };
+        let first_release = held_peer.shutdown().await;
+        drop(held_peer);
+        let pressure_retired = timeout(IO_WAIT, async {
+            while !retry.get_transports_unicast().await.is_empty()
+                || listener.get_transports_unicast().await.len() != 1
+            {
+                yield_now().await;
+            }
+        })
+        .await;
+        let fresh = timeout(IO_WAIT, retry.open_transport_unicast(endpoint.clone())).await;
+        let fresh_peer = match &fresh {
+            Ok(Ok(transport)) => Some(transport.get_peer()),
+            _ => None,
+        };
+        let fresh_membership_guard = timeout(IO_WAIT, async {
+            if matches!(&fresh, Ok(Ok(_))) {
+                while listener.get_transports_unicast().await.len() != 2 {
+                    yield_now().await;
+                }
+            }
+        })
+        .await;
+        let listener_fresh = listener
+            .get_transports_unicast()
+            .await
+            .into_iter()
+            .map(|transport| transport.get_peer())
+            .collect::<Vec<_>>();
+        let retry_fresh = retry
+            .get_transports_unicast()
+            .await
+            .into_iter()
+            .map(|transport| transport.get_peer())
+            .collect::<Vec<_>>();
+        let fresh_close = match &fresh {
+            Ok(Ok(transport)) => Some(timeout(IO_WAIT, transport.close()).await),
+            _ => None,
+        };
+        let live_close = timeout(IO_WAIT, established.close()).await;
+        let transports_retired = timeout(IO_WAIT, async {
+            while !listener.get_transports_unicast().await.is_empty() {
+                yield_now().await;
+            }
+        })
+        .await;
+        let listener_close = timeout(IO_WAIT, listener.del_listener(&listening)).await;
+        let listener_joined = timeout(IO_WAIT, listener.close()).await;
+        let live_joined = timeout(IO_WAIT, live.close()).await;
+        let retry_joined = timeout(IO_WAIT, retry.close()).await;
+        let empty = [
+            (
+                listener.get_listeners().await,
+                listener.get_transports_unicast().await,
+            ),
+            (
+                live.get_listeners().await,
+                live.get_transports_unicast().await,
+            ),
+            (
+                retry.get_listeners().await,
+                retry.get_transports_unicast().await,
+            ),
+        ];
+        initial_membership.expect("live peer reached the listener");
+        hello_length.expect("original ClientHello encoded");
+        hello_sent
+            .expect("ClientHello write guard")
+            .expect("ClientHello written");
+        first_flight
+            .expect("server flight guard")
+            .expect("actual server flight read");
+        for original in parsed {
+            original.expect("actual private-CA server authentication");
+        }
+        assert!(!flights.is_empty());
+        assert!(!held_tls.is_handshaking());
+        assert!(held_tls.wants_write(), "client Finished remained queued");
+        assert_eq!(held_tls.protocol_version(), Some(ProtocolVersion::TLSv1_3));
+        assert!(matches!(first_open, Err(cause) if cause.kind() == ErrorKind::WouldBlock));
+        assert!(held_for < HANDSHAKE_WAIT);
+        assert!(matches!(first_poll, Poll::Pending));
+        assert!(matches!(&scheduled, Ok(true)));
+        traffic.expect("actual established traffic while native open was pending");
+        assert!(
+            traffic_elapsed < OPEN_WAIT,
+            "traffic did not consume the open deadline"
+        );
+        assert_eq!(received.get_count(), 1);
+        membership_guard.expect("held native membership settled");
+        assert_eq!(live_held.len(), 1);
+        let live_remote = live_held[0].as_ref().unwrap();
+        assert_eq!(
+            (live_remote.zid, live_remote.whatami),
+            (listener_id, listener_role)
+        );
+        for original in listener_held.iter().chain(listener_fresh.iter()) {
+            let peer = original.as_ref().unwrap();
+            assert_eq!((peer.whatami, peer.links.len()), (caller_role, 1));
+        }
+        let held_ids = listener_held
+            .iter()
+            .map(|original| original.as_ref().unwrap().zid)
+            .collect::<HashSet<_>>();
+        match pressured.as_ref().unwrap() {
+            Ok(_) => {
+                let peer = pressure_peer.as_ref().unwrap().as_ref().unwrap();
+                assert_eq!(
+                    (peer.zid, peer.whatami, peer.links.len()),
+                    (listener_id, listener_role, 1)
+                );
+                assert_eq!(held_ids, HashSet::from([live_id, retry_id]));
+                assert_eq!(retry_held.len(), 1);
+                let peer = retry_held[0].as_ref().unwrap();
+                assert_eq!((peer.zid, peer.whatami), (listener_id, listener_role));
+                assert!(matches!(&pressure_close, Some(Ok(Ok(())))));
+            }
+            Err(original) => {
+                assert!(pressured_elapsed >= OPEN_WAIT);
+                let diagnostic = original.to_string();
+                assert!(diagnostic.starts_with("deadline has elapsed at "));
+                assert!(diagnostic.contains("zenoh-transport/src/unicast/manager.rs:"));
+                assert!(original.source().is_none());
+                assert_eq!(held_ids, HashSet::from([live_id]));
+                assert!(retry_held.is_empty());
+                assert!(pressure_close.is_none());
+            }
+        }
+        first_release.expect("held native TCP peer explicitly released");
+        pressure_retired.expect("pressure transport fully retired before same-owner retry");
+        fresh_membership_guard.expect("fresh native membership settled");
+        let peer = fresh_peer
+            .as_ref()
+            .expect("fresh original open result")
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            (peer.zid, peer.whatami, peer.links.len()),
+            (listener_id, listener_role, 1)
+        );
+        assert_eq!(listener_fresh.len(), 2);
+        let fresh_ids = listener_fresh
+            .iter()
+            .map(|original| original.as_ref().unwrap().zid)
+            .collect::<HashSet<_>>();
+        assert_eq!(fresh_ids, HashSet::from([live_id, retry_id]));
+        assert_eq!(retry_fresh.len(), 1);
+        let peer = retry_fresh[0].as_ref().unwrap();
+        assert_eq!((peer.zid, peer.whatami), (listener_id, listener_role));
+        assert!(matches!(&fresh_close, Some(Ok(Ok(())))));
+        assert!(matches!(&live_close, Ok(Ok(()))));
+        transports_retired.expect("all listener native transports retired");
+        assert!(matches!(&listener_close, Ok(Ok(()))));
+        listener_joined.expect("actual listener owner cleanup joined");
+        live_joined.expect("actual live native owner cleanup joined");
+        retry_joined.expect("actual retry native owner cleanup joined");
+        for (listeners, transports) in empty {
+            assert_eq!(listeners.len(), 0);
+            assert_eq!(transports.len(), 0);
+        }
+        assert!(
+            pressured.as_ref().unwrap().is_err(),
+            "full native open succeeded while the first authenticated handshake was held"
+        );
+    })
+    .await
+    .expect("whole native trace guard is setup/cleanup failure, not law evidence");
 }

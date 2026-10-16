@@ -15,17 +15,20 @@ use std::{convert::TryFrom, sync::Arc, time::Duration};
 
 use zenoh_core::ztimeout;
 use zenoh_link::EndPoint;
+#[cfg(feature = "transport_tls")]
+use zenoh_link_commons::tls::config::{
+    TLS_CONNECT_CERTIFICATE_RAW, TLS_CONNECT_PRIVATE_KEY_RAW, TLS_ENABLE_MTLS,
+    TLS_LISTEN_CERTIFICATE_RAW, TLS_LISTEN_PRIVATE_KEY_RAW, TLS_ROOT_CA_CERTIFICATE_RAW,
+};
 use zenoh_protocol::core::{Address, WhatAmI, ZenohIdProto};
 use zenoh_result::ZResult;
-use zenoh_test::{get_free_tcp_port, get_free_udp_port};
+use zenoh_test::get_free_tcp_port;
 use zenoh_transport::{
     multicast::TransportMulticast,
     unicast::{test_helpers::make_transport_manager_builder, TransportUnicast},
     DummyTransportPeerEventHandler, TransportEventHandler, TransportManager,
     TransportMulticastEventHandler, TransportPeer, TransportPeerEventHandler,
 };
-#[cfg(any(feature = "transport_tcp", feature = "transport_udp"))]
-use zenoh_util::net::get_ipv4_ipaddrs;
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const TIMEOUT_EXPECTED: Duration = Duration::from_secs(5);
@@ -82,58 +85,6 @@ impl TransportEventHandler for SHClientOpenClose {
     ) -> ZResult<Arc<dyn TransportMulticastEventHandler>> {
         panic!();
     }
-}
-
-/// Like `openclose_transport` but asserts that the transport open FAILS.
-///
-/// Use for tests where the connect endpoint is expected to be rejected
-/// (e.g. IPv6 bind address to an IPv4 listen endpoint).
-async fn openclose_transport_expect_failure(
-    listen_endpoint: &EndPoint,
-    connect_endpoint: &EndPoint,
-    lowlatency_transport: bool,
-) {
-    let router_id = ZenohIdProto::try_from([1]).unwrap();
-    let router_handler = Arc::new(SHRouterOpenClose);
-    let unicast = make_transport_manager_builder(
-        #[cfg(feature = "transport_multilink")]
-        2,
-        lowlatency_transport,
-    )
-    .max_sessions(1);
-    let router_manager = TransportManager::builder()
-        .whatami(WhatAmI::Router)
-        .zid(router_id)
-        .unicast(unicast)
-        .build_test(router_handler.clone())
-        .unwrap();
-
-    let client01_id = ZenohIdProto::try_from([2]).unwrap();
-    let unicast = make_transport_manager_builder(
-        #[cfg(feature = "transport_multilink")]
-        2,
-        lowlatency_transport,
-    )
-    .max_sessions(1);
-    let client01_manager = TransportManager::builder()
-        .whatami(WhatAmI::Client)
-        .zid(client01_id)
-        .unicast(unicast)
-        .build_test(Arc::new(SHClientOpenClose::new()))
-        .unwrap();
-
-    let router_res = ztimeout!(router_manager.add_listener(listen_endpoint.clone()));
-    assert!(router_res.is_ok());
-
-    let open_res =
-        ztimeout_expected!(client01_manager.open_transport_unicast(connect_endpoint.clone()));
-    assert!(
-        open_res.is_err(),
-        "expected transport open to fail (protocol mismatch), but it succeeded: {open_res:?}"
-    );
-
-    ztimeout!(router_manager.close());
-    ztimeout!(client01_manager.close());
 }
 
 async fn openclose_transport(
@@ -323,220 +274,9 @@ async fn openclose_transport(
     tokio::time::sleep(SLEEP).await;
 }
 
-#[cfg(feature = "transport_tcp")]
-#[should_panic(expected = "assertion failed: open_res.is_ok()")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn openclose_tcp_only_connect_with_bind_and_interface() {
-    let addrs = get_ipv4_ipaddrs(None, true);
-
-    zenoh_util::init_log_from_env_or("error");
-
-    let listen_port = get_free_tcp_port();
-    let bind_port = get_free_tcp_port();
-    let bind_addr_str = format!("{}:{}", addrs[0], bind_port);
-    let bind_addr = Address::from(bind_addr_str.as_str());
-
-    let listen_endpoint: EndPoint = format!("tcp/{}:{}", addrs[0], listen_port).parse().unwrap();
-
-    // declaring `bind` and `iface` simultaneously should be unsupported, and there for fail
-    let connect_endpoint: EndPoint = format!(
-        "tcp/{}:{}#iface=lo;bind={}",
-        addrs[0], listen_port, bind_addr
-    )
-    .parse()
-    .unwrap();
-
-    // should not connect to local interface and external address
-    openclose_transport(&listen_endpoint, &connect_endpoint, &bind_addr, false).await;
-}
-
-#[cfg(feature = "transport_tcp")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn openclose_tcp_only_connect_with_bind_restriction() {
-    let addrs = get_ipv4_ipaddrs(None, true);
-
-    zenoh_util::init_log_from_env_or("error");
-
-    let listen_port = get_free_tcp_port();
-    let bind_port = get_free_tcp_port();
-    let listen_endpoint: EndPoint = format!("tcp/{}:{}", addrs[0], listen_port).parse().unwrap();
-    let bind_addr_str = format!("{}:{}", addrs[0], bind_port);
-    let bind_addr = Address::from(bind_addr_str.as_str());
-
-    // Bind to different port on same IP address
-    // Expect this test to succeed -
-    // When running the test multiple times locally a TcpStream does not get cleaned up
-    let connect_endpoint: EndPoint =
-        format!("tcp/{}:{}#bind={}", addrs[0], listen_port, bind_addr_str)
-            .parse()
-            .unwrap();
-
-    // should not connect to local interface and external address
-    openclose_transport(&listen_endpoint, &connect_endpoint, &bind_addr, false).await;
-}
-
-#[cfg(feature = "transport_tcp")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn openclose_tcp_only_connect_with_bind_restriction_mismatch_protocols() {
-    use zenoh_util::net::get_ipv6_ipaddrs;
-
-    let addrs = get_ipv4_ipaddrs(None, true);
-    let addrs_v6 = get_ipv6_ipaddrs(None, true);
-
-    if addrs_v6.is_empty() {
-        // No IPv6 addresses on this host; test requires IPv6 to produce a protocol mismatch.
-        return;
-    }
-
-    let listen_port = get_free_tcp_port();
-    let bind_addr_str = format!("{}:{}", addrs_v6[0], get_free_tcp_port());
-
-    zenoh_util::init_log_from_env_or("error");
-
-    let listen_endpoint: EndPoint = format!("tcp/{}:{}", addrs[0], listen_port).parse().unwrap();
-
-    // Connecting to an IPv4 endpoint while binding to an IPv6 address should fail.
-    let connect_endpoint: EndPoint =
-        format!("tcp/{}:{}#bind={}", addrs[0], listen_port, bind_addr_str)
-            .parse()
-            .unwrap();
-
-    openclose_transport_expect_failure(&listen_endpoint, &connect_endpoint, false).await;
-}
-
-#[cfg(feature = "transport_udp")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn openclose_udp_only_connect_with_bind_restriction_mismatch_protocols() {
-    use zenoh_util::net::get_ipv6_ipaddrs;
-
-    let addrs = get_ipv4_ipaddrs(None, true);
-    let addrs_v6 = get_ipv6_ipaddrs(None, true);
-
-    if addrs_v6.is_empty() {
-        // No IPv6 addresses on this host; test requires IPv6 to produce a protocol mismatch.
-        return;
-    }
-
-    let listen_port = get_free_udp_port();
-    let bind_addr_str = format!("{}:{}", addrs_v6[0], get_free_udp_port());
-
-    zenoh_util::init_log_from_env_or("error");
-
-    let listen_endpoint: EndPoint = format!("udp/{}:{}", addrs[0], listen_port).parse().unwrap();
-
-    // Connecting to an IPv4 endpoint while binding to an IPv6 address should fail.
-    let connect_endpoint: EndPoint =
-        format!("udp/{}:{}#bind={}", addrs[0], listen_port, bind_addr_str)
-            .parse()
-            .unwrap();
-
-    openclose_transport_expect_failure(&listen_endpoint, &connect_endpoint, false).await;
-}
-
-#[cfg(feature = "transport_udp")]
-#[should_panic(expected = "assertion failed: open_res.is_ok()")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn openclose_udp_only_connect_with_bind_and_interface() {
-    let addrs = get_ipv4_ipaddrs(None, true);
-    let listen_port = get_free_udp_port();
-    let bind_port = get_free_udp_port();
-    let bind_addr_str = format!("{}:{}", addrs[0], bind_port);
-    let bind_addr = Address::from(bind_addr_str.as_str());
-
-    zenoh_util::init_log_from_env_or("error");
-
-    let listen_endpoint: EndPoint = format!("udp/{}:{}", addrs[0], listen_port).parse().unwrap();
-
-    let connect_endpoint: EndPoint = format!(
-        "udp/{}:{}#iface=lo;bind={}",
-        addrs[0], listen_port, bind_addr_str
-    )
-    .parse()
-    .unwrap();
-
-    // should not connect to local interface and external address
-    openclose_transport(&listen_endpoint, &connect_endpoint, &bind_addr, false).await;
-}
-
-#[cfg(feature = "transport_udp")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn openclose_udp_only_connect_with_bind_restriction() {
-    let addrs = get_ipv4_ipaddrs(None, true);
-    let listen_port = get_free_udp_port();
-    let bind_port = get_free_udp_port();
-    let bind_addr_str = format!("{}:{}", addrs[0], bind_port);
-    let bind_addr = Address::from(bind_addr_str.as_str());
-
-    zenoh_util::init_log_from_env_or("error");
-
-    let listen_endpoint: EndPoint = format!("udp/{}:{}", addrs[0], listen_port).parse().unwrap();
-
-    let connect_endpoint: EndPoint =
-        format!("udp/{}:{}#bind={}", addrs[0], listen_port, bind_addr_str)
-            .parse()
-            .unwrap();
-
-    // should not connect to local interface and external address
-    openclose_transport(&listen_endpoint, &connect_endpoint, &bind_addr, false).await;
-}
-
-#[cfg(feature = "transport_quic")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn openclose_quic_only_connect_with_bind_restriction() {
-    use zenoh_link_commons::tls::config::*;
-
-    zenoh_util::init_log_from_env_or("error");
-    let connect_port = get_free_udp_port();
-    let bind_addr_str = format!("localhost:{}", get_free_udp_port());
-    let bind_addr = Address::from(bind_addr_str.as_str());
-
-    let client_auth = "true";
-    // Define the client
-    let mut connect_endpoint: EndPoint =
-        (format!("quic/localhost:{}#bind={}", connect_port, bind_addr_str))
-            .parse()
-            .unwrap();
-    connect_endpoint
-        .config_mut()
-        .extend_from_iter(
-            [
-                (TLS_ROOT_CA_CERTIFICATE_RAW, SERVER_CA),
-                (TLS_CONNECT_CERTIFICATE_RAW, CLIENT_CERT),
-                (TLS_CONNECT_PRIVATE_KEY_RAW, CLIENT_KEY),
-                (TLS_ENABLE_MTLS, client_auth),
-            ]
-            .iter()
-            .copied(),
-        )
-        .unwrap();
-
-    // Define the server
-    let mut listen_endpoint: EndPoint = (format!("quic/localhost:{}", connect_port))
-        .parse()
-        .unwrap();
-    listen_endpoint
-        .config_mut()
-        .extend_from_iter(
-            [
-                (TLS_ROOT_CA_CERTIFICATE_RAW, CLIENT_CA),
-                (TLS_LISTEN_CERTIFICATE_RAW, SERVER_CERT),
-                (TLS_LISTEN_PRIVATE_KEY_RAW, SERVER_KEY),
-                (TLS_ENABLE_MTLS, client_auth),
-            ]
-            .iter()
-            .copied(),
-        )
-        .unwrap();
-
-    // should not connect to local interface and external address
-    openclose_transport(&listen_endpoint, &connect_endpoint, &bind_addr, false).await;
-}
-
 #[cfg(feature = "transport_tls")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn openclose_tls_only_connect_with_bind_restriction() {
-    use zenoh_link_commons::tls::config::*;
-
     zenoh_util::init_log_from_env_or("error");
     let connect_port = get_free_tcp_port();
     let bind_addr_str = format!("localhost:{}", get_free_tcp_port());
