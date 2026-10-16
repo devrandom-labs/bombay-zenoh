@@ -58,6 +58,9 @@ pub struct TransportManagerConfigUnicast {
     pub keep_alive: usize,
     pub open_timeout: Duration,
     pub accept_timeout: Duration,
+    /// Global limit for active incoming establishments and, separately, queued accepted links.
+    /// Dispatcher-held or reserved links and unfinished listener operations are additional.
+    /// Zero admits no incoming transports; must be smaller than `usize::MAX`.
     pub accept_pending: usize,
     pub max_sessions: usize,
     pub is_qos: bool,
@@ -208,6 +211,9 @@ impl TransportManagerBuilderUnicast {
         self
     }
 
+    /// Set the global active-establishment and accepted-queue limits separately.
+    /// Dispatcher-held or reserved links and unfinished listener operations are additional.
+    /// Zero admits none; [`Self::build`] rejects `usize::MAX`.
     pub fn accept_pending(mut self, accept_pending: usize) -> Self {
         self.accept_pending = accept_pending;
         self
@@ -278,12 +284,25 @@ impl TransportManagerBuilderUnicast {
         Ok(self)
     }
 
+    /// Build the unicast configuration and state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for simultaneous QoS and low latency or an
+    /// `accept_pending` value of `usize::MAX`. With `transport_multilink` and
+    /// multiple allowed links, also returns multi-link key generation errors.
     pub fn build(
         self,
         #[allow(unused)] prng: &mut PseudoRng, // Required for #[cfg(feature = "transport_multilink")]
     ) -> ZResult<TransportManagerParamsUnicast> {
         if self.is_qos && self.is_lowlatency {
             bail!("'qos' and 'lowlatency' options are incompatible");
+        }
+        if self.accept_pending == usize::MAX {
+            bail!(
+                "'accept_pending' must be smaller than usize::MAX ({})",
+                usize::MAX
+            );
         }
 
         let config = TransportManagerConfigUnicast {

@@ -471,18 +471,35 @@ async fn accept_task(
         e
     })?;
 
-    let mut listener = tls_listener::builder(acceptor)
-        .handshake_timeout(tls_handshake_timeout)
-        .listen(socket);
-
     tracing::trace!("Ready to accept TLS connections on: {:?}", src_addr);
     loop {
         tokio::select! {
             _ = token.cancelled() => break,
 
-            res = listener.accept() => {
+            res = socket.accept() => {
                 match res {
-                    Ok((tls_stream, dst_addr)) => {
+                    Ok((tcp_stream, dst_addr)) => {
+                        // This listener retains one handshake until handoff or rejection.
+                        let handshake = tokio::select! {
+                            _ = token.cancelled() => break,
+                            original = tokio::time::timeout(
+                                tls_handshake_timeout,
+                                acceptor.accept(tcp_stream),
+                            ) => original,
+                        };
+                        let tls_stream = match handshake {
+                            Ok(Ok(stream)) => stream,
+                            Ok(Err(cause)) => {
+                                tracing::warn!("TLS handshake from {dst_addr} failed: {cause}");
+                                tokio::time::sleep(Duration::from_micros(*TLS_ACCEPT_THROTTLE_TIME)).await;
+                                continue;
+                            }
+                            Err(cause) => {
+                                tracing::warn!("TLS handshake from {dst_addr} timed out: {cause}");
+                                tokio::time::sleep(Duration::from_micros(*TLS_ACCEPT_THROTTLE_TIME)).await;
+                                continue;
+                            }
+                        };
                         let (tcp_stream, tls_conn) = tls_stream.get_ref();
                         let src_addr =  match tcp_stream.local_addr()  {
                             Ok(sa) => sa,
@@ -543,11 +560,11 @@ async fn accept_task(
                         });
 
                         // Communicate the new link to the initial transport manager
-                        if let Err(e) = manager
-                            .send_async(LinkUnicast::from(link as Arc<dyn LinkUnicastTrait>))
-                            .await
+                        if let Err(rejected) =
+                            manager.try_send(LinkUnicast::from(link as Arc<dyn LinkUnicastTrait>))
                         {
-                            tracing::error!("{}-{}: {}", file!(), line!(), e)
+                            // Both refusal reasons close only their untransferred original.
+                            rejected.into_inner().close().await?;
                         }
                     }
                     Err(e) => {

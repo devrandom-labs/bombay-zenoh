@@ -25,7 +25,11 @@ for profile in debug release; do
   cargo clippy --manifest-path ci/release-credential/Cargo.toml --locked --jobs 2 \
     "${build_arguments[@]}" --all-targets -- -D warnings
   cargo test --locked --jobs 2 "${build_arguments[@]}" \
-    -p bombay-zenoh-link-tls -- --test-threads=1
+    -p bombay-zenoh-link-tls --doc -- --test-threads=1
+  cargo test --locked --jobs 2 "${build_arguments[@]}" \
+    -p bombay-zenoh-link-tls -p bombay-zenoh-transport --all-targets \
+    --no-default-features --features \
+    bombay-zenoh-transport/transport_tls,bombay-zenoh-transport/test -- --test-threads=1
   cargo test --locked --jobs 2 "${build_arguments[@]}" \
     -p bombay-validated-struct-macros --lib --test structure
   cargo test --locked --jobs 2 "${build_arguments[@]}" \
@@ -33,8 +37,9 @@ for profile in debug release; do
     --no-default-features --features transport_tls,test \
     openclose_tls_only_with_mtls_and_no_public_pki -- --exact
   cargo clippy --locked --jobs 2 "${build_arguments[@]}" \
-    -p bombay-zenoh-transport --test unicast_openclose \
-    --no-default-features --features transport_tls,test -- -D warnings
+    -p bombay-zenoh-link-tls -p bombay-zenoh-transport --all-targets \
+    --no-default-features --features \
+    bombay-zenoh-transport/transport_tls,bombay-zenoh-transport/test -- -D warnings
   BOMBAY_DECLARATION_CERTIFICATES="$PWD/zenoh/tests/fixtures/declaration-pressure" \
     cargo test --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib \
       --no-default-features --features transport_tls \
