@@ -22,7 +22,7 @@ license-file = { workspace = true }
 name = "bombay-zenoh-link-tls"
 repository = { workspace = true }
 rust-version = "1.88.0"
-version = "1.10.3"
+version = "1.10.4"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
@@ -34,7 +34,6 @@ rustls-webpki = { workspace = true }
 secrecy = { workspace = true }
 socket2 = { workspace = true }
 time = { workspace = true }
-tls-listener = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "net", "sync"] }
 tokio-rustls = { workspace = true }
 tokio-util = { workspace = true, features = ["rt"] }

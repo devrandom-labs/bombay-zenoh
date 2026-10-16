@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "bombay-zenoh"
-version = "1.10.9"
+version = "1.10.10"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "bombay-zenoh-link"
-version = "1.10.3"
+version = "1.10.4"
 dependencies = [
  "bombay-zenoh-config",
  "bombay-zenoh-link-commons",
@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "bombay-zenoh-link-tls"
-version = "1.10.3"
+version = "1.10.4"
 dependencies = [
  "async-trait",
  "base64",
@@ -338,7 +338,6 @@ dependencies = [
  "secrecy",
  "socket2 0.5.10",
  "time",
- "tls-listener",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -369,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "bombay-zenoh-transport"
-version = "1.10.3"
+version = "1.10.4"
 dependencies = [
  "async-trait",
  "bombay-zenoh-config",
@@ -2684,19 +2683,6 @@ name = "tinyvec_macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
-
-[[package]]
-name = "tls-listener"
-version = "0.11.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1461056cc1ef47003f7ee16e4cef3741068d4c7f6b627bfce49b7c00c120a530"
-dependencies = [
- "futures-util",
- "pin-project-lite",
- "thiserror",
- "tokio",
- "tokio-rustls",
-]
 
 [[package]]
 name = "token-cell"

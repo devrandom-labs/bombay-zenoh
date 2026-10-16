@@ -80,8 +80,8 @@ for profile in debug release; do
   done
 done
 
-# Preserve the previous exact configuration cohort alongside the new security cohort.
-release_kind="${RELEASE_KIND:-tls-security-successor}"
+# Preserve historical cohorts alongside the incoming TLS successor.
+release_kind="${RELEASE_KIND:-tls-ingress-successor}"
 case "$release_kind" in
   configuration-successor)
     successor_packages=(bombay-zenoh-config bombay-zenoh-link-tls
@@ -91,6 +91,9 @@ case "$release_kind" in
     successor_packages=(bombay-zenoh-link-commons bombay-zenoh-link-tls
       bombay-zenoh-link bombay-zenoh-transport bombay-zenoh)
     source_profile=tls-security-cohort ;;
+  tls-ingress-successor)
+    successor_packages=(bombay-zenoh-link-tls bombay-zenoh-link bombay-zenoh-transport bombay-zenoh)
+    source_profile=tls-ingress-cohort ;;
   *) printf 'Unknown verification cohort\n' >&2; exit 1 ;;
 esac
 successor_arguments=()

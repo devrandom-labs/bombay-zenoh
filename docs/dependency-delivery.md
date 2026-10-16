@@ -53,6 +53,23 @@ bounds remain governed by Bombay's static remote actor PRD. The inherited
 nested-runtime panic test is not accepted as a client-certificate rejection witness.
 The separate corrected-graph healthy/refusal campaign remains recorded in that PRD.
 
+## Incoming TLS successor
+
+The selected `tls-ingress-successor` source prepares four new packages in Cargo's
+dependency order: TLS link, link and transport `1.10.4`, then Zenoh `1.10.10`.
+Config/plugin `1.10.2`, link commons `1.10.2` and validated structs/macros `2.2.0`
+remain immutable registry dependencies. The archive verifier retains all nine
+owners, 29 transitive checksum edges and exact license/source/VCS custody.
+New manifests and archive locks must omit the retired `tls-listener` dependency.
+
+`tls-ingress-cohort` checks actual candidate archives before publication; the
+ordinary registry profile uses published dependencies. Neither local candidate
+paths nor a successful dry run establish registry availability. Every new source
+requires its own native debug/optimized checks, supported feature profiles,
+compiler-floor, Miri, packaged query/config checks and required CI before merge.
+Historical release selections retain their original version maps and refuse a
+conflicting current source. The original partial-release resume remains unchanged.
+
 ## Review, merge and publication
 
 The controlled repository starts `main` at the exact upstream base. Corrections
@@ -66,8 +83,8 @@ and merge commit. A local package build or open PR does not establish delivery.
 Publication is manual after review and passing required CI. Authenticate using
 publishing authority scoped to these packages; no registry credentials are stored
 in this source repository. First confirm that the selected package versions remain
-available. Publish in dependency order, allowing the registry to expose each
-version before publishing a dependent:
+available. The initial cohort used this dependency order, allowing the registry to expose
+each version before publishing a dependent:
 
 1. `bombay-validated-struct-macros` 2.2.0.
 2. `bombay-validated-struct` 2.2.0 and `bombay-zenoh-link-commons` 1.10.1.
@@ -77,8 +94,8 @@ version before publishing a dependent:
 6. `bombay-zenoh-transport` 1.10.1.
 7. `bombay-zenoh` 1.10.1.
 
-The manual workflow prepares all nine publication candidates with Cargo's same
-selected `json_get,json5` feature graph. It audits their exact source revision,
+The initial workflow prepared all nine candidates with the selected
+`json_get,json5` graph. Successor operations prepare their exact selected cohort. It audits their exact source revision,
 normalized manifests and all 29 corrected archived lock checksums. Publication
 uses one standard Cargo multi-package invocation; Cargo owns dependency ordering
 and registry visibility waits. A private credential executable uses the owning
@@ -108,4 +125,6 @@ receipts retain every established uploaded prefix, including a later refusal.
 Cargo rejects already registered selected versions rather than silently skipping
 them. A partial-cohort retry therefore needs a separately prepared, reviewed
 selection preserving the original audited artifacts; the release is not atomic.
-No registry publication, release tag or completed feature delivery is recorded here.
+Those preparation facts describe the initial cohort. Subsequent published cohorts
+are recorded in the repository README; the incoming TLS successor remains a
+candidate until its own publication and registry-only verification pass.
