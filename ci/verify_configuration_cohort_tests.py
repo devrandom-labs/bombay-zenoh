@@ -103,7 +103,8 @@ class ConfigurationCohortEvidence(unittest.TestCase):
                 verify_manifest(owner, successor, kind)
                 successor_lock = tomllib.loads(contents[owner]["Cargo.lock"].decode())
                 changed = copy.deepcopy(successor_lock)
-                changed["package"].append({"name": "tls-listener", "version": "0.11.2"})
+                changed["package"].append({"name": "tls-listener", "version": "0.11.2",
+                                           "source": "registry+https://github.com/rust-lang/crates.io-index"})
                 with self.subTest(owner=owner), self.assertRaisesRegex(ValueError, "retired locked listener"):
                     verify_lock(owner, changed, checksums, kind)
                 verify_lock(owner, successor_lock, checksums, kind)
