@@ -11,10 +11,19 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
-use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt,
+    num::NonZeroU32,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use rand::{RngCore, SeedableRng};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use zenoh_config::{ExpandedConfig, LinkRxConf, QueueAllocConf, QueueConf, QueueSizeConf};
 use zenoh_crypto::{BlockCipher, PseudoRng};
 use zenoh_link::{LinkKind, NewLinkChannelSender};
@@ -199,6 +208,46 @@ pub struct TransportManagerState {
     pub uring: Option<Uring>,
 }
 
+pub(crate) struct ReceiveBudget {
+    limit: u32,
+    available: Arc<Semaphore>,
+    refusals: AtomicU64,
+}
+
+impl ReceiveBudget {
+    pub(crate) fn new(limit: NonZeroU32) -> Self {
+        Self {
+            limit: limit.get(),
+            available: Arc::new(Semaphore::new(limit.get() as usize)),
+            refusals: AtomicU64::new(0),
+        }
+    }
+
+    pub(crate) fn charge(&self, bytes: usize) -> Result<OwnedSemaphorePermit, TryAcquireError> {
+        let charge = if bytes <= self.limit as usize {
+            Arc::clone(&self.available).try_acquire_many_owned(bytes as u32)
+        } else {
+            Err(TryAcquireError::NoPermits)
+        };
+        if charge.is_err() {
+            #[allow(deprecated, reason = "fetch_update supports the SDK's Rust 1.88 floor")]
+            let _previous =
+                self.refusals
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                        Some(count.saturating_add(1))
+                    });
+        }
+        charge
+    }
+    pub(crate) fn charged_bytes(&self) -> u32 {
+        self.limit - self.available.available_permits() as u32
+    }
+
+    pub(crate) fn refusals(&self) -> u64 {
+        self.refusals.load(Ordering::Relaxed)
+    }
+}
+
 impl fmt::Debug for TransportManagerState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = f.debug_struct("TransportManagerState");
@@ -213,6 +262,7 @@ impl fmt::Debug for TransportManagerState {
 pub struct TransportManagerParams {
     config: TransportManagerConfig,
     state: TransportManagerState,
+    unicast_buffer_limit: Option<NonZeroU32>,
 }
 
 impl fmt::Debug for TransportManagerParams {
@@ -239,6 +289,7 @@ pub struct TransportManagerBuilder {
     queue_alloc: QueueAllocConf,
     defrag_buff_size: usize,
     link_rx_buffer_size: usize,
+    unicast_buffer_limit: Option<NonZeroU32>,
     unicast: TransportManagerBuilderUnicast,
     multicast: TransportManagerBuilderMulticast,
     link_configs: HashMap<LinkKind, String>, // (protocol, config)
@@ -431,6 +482,7 @@ impl TransportManagerBuilder {
         ));
         self = self.defrag_buff_size(*link.rx().max_message_size());
         self = self.link_rx_buffer_size(*link.rx().buffer_size());
+        self.unicast_buffer_limit = *link.rx().unicast_buffer_limit();
         self = self.wait_before_drop(duration_from_i64us(*cc_drop.wait_before_drop()));
         self = self.max_wait_before_drop_fragments(duration_from_i64us(
             *cc_drop.max_wait_before_drop_fragments(),
@@ -480,6 +532,13 @@ impl TransportManagerBuilder {
 
         let unicast = self.unicast.build(&mut prng)?;
         let multicast = self.multicast.build()?;
+        if self.unicast_buffer_limit.is_some_and(|limit| {
+            limit.get() as usize > Semaphore::MAX_PERMITS
+                || unicast.config.is_lowlatency
+                || cfg!(feature = "transport_compression")
+        }) {
+            bail!("Unsupported unicast receive buffer limit for this transport configuration");
+        }
 
         let mut queue_size = [0; Priority::NUM];
         queue_size[Priority::Control as usize] = *self.queue_size.control();
@@ -560,7 +619,11 @@ impl TransportManagerBuilder {
                 .ok(),
         };
 
-        let params = TransportManagerParams { config, state };
+        let params = TransportManagerParams {
+            config,
+            state,
+            unicast_buffer_limit: self.unicast_buffer_limit,
+        };
 
         Ok(TransportManager::new(
             params,
@@ -606,6 +669,7 @@ impl Default for TransportManagerBuilder {
             batching_time_limit: Duration::from_millis(backoff),
             defrag_buff_size: *link_rx.max_message_size(),
             link_rx_buffer_size: *link_rx.buffer_size(),
+            unicast_buffer_limit: *link_rx.unicast_buffer_limit(),
             link_configs: HashMap::new(),
             unicast: TransportManagerBuilderUnicast::default(),
             multicast: TransportManagerBuilderMulticast::default(),
@@ -625,6 +689,7 @@ impl Default for TransportManagerBuilder {
 pub struct TransportManager {
     pub config: Arc<TransportManagerConfig>,
     pub(crate) state: Arc<TransportManagerState>,
+    pub(crate) unicast_receive: Option<Arc<ReceiveBudget>>,
     pub(crate) prng: Arc<AsyncMutex<PseudoRng>>,
     pub(crate) cipher: Arc<BlockCipher>,
     pub(crate) locator_inspector: zenoh_link::LocatorInspector,
@@ -632,6 +697,20 @@ pub struct TransportManager {
     #[cfg(feature = "stats")]
     pub(crate) stats: zenoh_stats::StatsRegistry,
     pub(crate) task_controller: TaskController,
+}
+
+impl TransportManager {
+    /// Currently charged established unicast receive bytes, if limited.
+    pub fn unicast_receive_bytes(&self) -> Option<u32> {
+        self.unicast_receive
+            .as_deref()
+            .map(ReceiveBudget::charged_bytes)
+    }
+
+    /// Refused established unicast receive allocations, if limited.
+    pub fn unicast_receive_refusals(&self) -> Option<u64> {
+        self.unicast_receive.as_deref().map(ReceiveBudget::refusals)
+    }
 }
 
 impl fmt::Debug for TransportManager {
@@ -670,6 +749,9 @@ impl TransportManager {
         let this = TransportManager {
             config: Arc::new(params.config),
             state: Arc::new(params.state),
+            unicast_receive: params
+                .unicast_buffer_limit
+                .map(|limit| Arc::new(ReceiveBudget::new(limit))),
             prng: Arc::new(AsyncMutex::new(prng)),
             cipher: Arc::new(cipher),
             locator_inspector: Default::default(),

@@ -8,7 +8,8 @@ import tomllib
 import unittest
 
 from verify_archives import (
-    CONFIGURATION_CANDIDATES, TLS_SECURITY_CANDIDATES, EDGES, PUBLISHED_DEPENDENCIES, ReleaseKind,
+    CONFIGURATION_CANDIDATES, TLS_INGRESS_RELEASES, TLS_SECURITY_CANDIDATES, TLS_SECURITY_RELEASES,
+    EDGES, PUBLISHED_DEPENDENCIES, ReleaseKind,
     identity, published_dependencies, published_owners, read_archive, verify_lock, verify_manifest, version,
 )
 
@@ -46,6 +47,12 @@ class ConfigurationCohortEvidence(unittest.TestCase):
         archives = Path("target/package/tmp-crate")
         ledger = json.loads(Path("target/package/audited-cohort.json").read_text())
         self.assertEqual(set(ledger), {identity(owner) for owner in candidates})
+        if kind is ReleaseKind.RECEIVE_BUDGET_SUCCESSOR:
+            self.assertEqual({name: archive["version"] for name, archive in ledger.items()}, {
+                "bombay-zenoh-config": "1.10.3", "bombay-zenoh-plugin-trait": "1.10.3",
+                "bombay-zenoh-link-tls": "1.10.5", "bombay-zenoh-link": "1.10.5",
+                "bombay-zenoh-transport": "1.10.5", "bombay-zenoh": "1.10.11",
+            })
         contents, checksums = {}, {}
         for owner in EDGES:
             prefix = identity(owner) + "-" + version(owner, kind)
@@ -71,7 +78,7 @@ class ConfigurationCohortEvidence(unittest.TestCase):
                 with self.subTest(owner=owner, floor=floor), self.assertRaisesRegex(ValueError, "verified compiler floor"):
                     verify_manifest(owner, changed, kind)
             verify_manifest(owner, successor, kind)
-        if kind in {ReleaseKind.TLS_SECURITY_SUCCESSOR, ReleaseKind.TLS_INGRESS_SUCCESSOR}:
+        if kind in TLS_SECURITY_RELEASES:
             for owner in ("zenoh-link-commons", "zenoh-link-tls"):
                 successor = tomllib.loads(contents[owner]["Cargo.toml"].decode())
                 for minimum in (None, "0.23.45"):
@@ -84,15 +91,15 @@ class ConfigurationCohortEvidence(unittest.TestCase):
                         verify_manifest(owner, changed, kind)
                 verify_manifest(owner, successor, kind)
         lock = tomllib.loads(contents["zenoh"]["Cargo.lock"].decode())
-        if kind in {ReleaseKind.TLS_SECURITY_SUCCESSOR, ReleaseKind.TLS_INGRESS_SUCCESSOR}:
-            for owner in candidates:
+        if kind in TLS_SECURITY_RELEASES:
+            for owner in candidates & TLS_SECURITY_CANDIDATES:
                 successor = tomllib.loads(contents[owner]["Cargo.lock"].decode())
                 changed = copy.deepcopy(successor)
                 next(package for package in changed["package"] if package["name"] == "rustls")["version"] = "0.23.45"
                 with self.subTest(owner=owner), self.assertRaisesRegex(ValueError, "locked Rustls minimum"):
                     verify_lock(owner, changed, checksums, kind)
                 verify_lock(owner, successor, checksums, kind)
-        if kind is ReleaseKind.TLS_INGRESS_SUCCESSOR:
+        if kind in TLS_INGRESS_RELEASES:
             for owner in EDGES:
                 successor = tomllib.loads(contents[owner]["Cargo.toml"].decode())
                 for alias in ("tls-listener", "retired-listener"):

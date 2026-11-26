@@ -38,7 +38,7 @@ use std::{
     fmt,
     io::Read,
     net::SocketAddr,
-    num::{NonZeroU16, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU32, NonZeroUsize},
     ops::{self, Bound, Deref, DerefMut, RangeBounds},
     path::Path,
     sync::{Arc, Weak},
@@ -779,6 +779,10 @@ validated_struct::validator! {
                     /// more in-flight data. This is particularly relevant when dealing with large messages.
                     /// E.g. for 16MiB rx_buffer_size set the value to: 16777216.
                     buffer_size: usize,
+                    /// Optional session-wide byte limit for established unicast receive batches,
+                    /// including reserved buffers and batches still shared after link closure.
+                    /// Requires the universal unicast transport without transport compression.
+                    unicast_buffer_limit: Option<NonZeroU32>,
                     /// Maximum size of the defragmentation buffer at receiver end (default: 1GiB).
                     /// Fragmented messages that are larger than the configured size will be dropped.
                     max_message_size: usize,

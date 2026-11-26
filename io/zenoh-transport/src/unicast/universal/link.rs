@@ -24,19 +24,20 @@
 ))]
 use std::fmt::Debug;
 use std::{
+    any::Any,
+    fmt,
     future::poll_fn,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex, OnceLock,
+        Arc, Mutex, OnceLock, Weak,
     },
     task::Poll,
     time::{Duration, Instant},
 };
 
 use futures::{future::select_all, task::AtomicWaker};
-use tokio::task::JoinHandle;
+use tokio::{sync::OwnedSemaphorePermit, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
-use zenoh_buffers::ZSlice;
 #[cfg(all(
     feature = "uring",
     target_os = "linux",
@@ -52,6 +53,7 @@ use zenoh_buffers::{
     buffer::Buffer,
     reader::{BacktrackableReader, HasReader},
 };
+use zenoh_buffers::{ZSlice, ZSliceBuffer};
 use zenoh_link::Link;
 use zenoh_protocol::{
     core::Priority,
@@ -88,6 +90,7 @@ use crate::{
         },
         priority::TransportPriorityTx,
     },
+    manager::ReceiveBudget,
     unicast::link::{TransportLinkUnicast, TransportLinkUnicastRx, TransportLinkUnicastTx},
 };
 
@@ -411,7 +414,10 @@ async fn rx_task(
             target_arch = "powerpc64"
         )
     ))]
-    if transport.manager.state.uring.is_some() && link.link.get_fd().is_ok() {
+    if transport.manager.unicast_receive.is_none()
+        && transport.manager.state.uring.is_some()
+        && link.link.get_fd().is_ok()
+    {
         return rx_task_uring(
             link,
             transport.clone(),
@@ -453,7 +459,12 @@ async fn rx_task_non_uring(
         tracing::debug!("RX configured buffer of {rx_buffer_size} bytes is too small for {link} that has an MTU of {mtu} bytes. Defaulting to {mtu} bytes for RX buffer.");
         n = 1;
     }
-    let pool = RecyclingObjectPool::new(n, move || vec![0_u8; mtu].into_boxed_slice());
+    let pool = match transport.manager.unicast_receive.as_ref() {
+        Some(budget) => ReceivePool::Charged(Arc::new(ReceiveReserve::new(n, mtu, budget)?)),
+        None => ReceivePool::Recycling(RecyclingObjectPool::new(n, move || {
+            vec![0_u8; mtu].into_boxed_slice()
+        })),
+    };
 
     let lease_tracker = TimeoutTracker::new(lease);
     if link.link.supports_priorities() {
@@ -496,28 +507,203 @@ async fn rx_task_non_uring(
     }
 }
 
+#[derive(Clone)]
+enum ReceivePool<F: Fn() -> Box<[u8]>> {
+    Recycling(RecyclingObjectPool<Box<[u8]>, F>),
+    Charged(Arc<ReceiveReserve>),
+}
+
+struct ReceiveReserve {
+    returning: flume::Sender<ChargedBytes>,
+    available: flume::Receiver<ChargedBytes>,
+}
+
+impl ReceiveReserve {
+    fn new(slots: usize, mtu: usize, budget: &ReceiveBudget) -> ZResult<Self> {
+        let mut reservation = budget.charge(slots * mtu)?;
+        let (returning, available) = flume::bounded(slots);
+        for _ in 0..slots {
+            let charge = reservation.split(mtu).expect("reserve was charged in full");
+            let buffer = ChargedBytes::new(mtu, charge);
+            let returned = returning.try_send(buffer);
+            assert!(returned.is_ok(), "reserve has one slot per buffer");
+        }
+        Ok(Self {
+            returning,
+            available,
+        })
+    }
+
+    fn loan(self: &Arc<Self>, mtu: usize, budget: &ReceiveBudget) -> ZResult<ReceiveBacking> {
+        // Unlike the legacy pool's try-lock checkout, an empty channel means
+        // there really is no free buffer. Lock contention is not pressure.
+        let (buffer, reserve) = match self.available.try_recv() {
+            Ok(buffer) => (buffer, Arc::downgrade(self)),
+            Err(flume::TryRecvError::Empty) => {
+                let charge = budget.charge(mtu)?;
+                (ChargedBytes::new(mtu, charge), Weak::new())
+            }
+            Err(flume::TryRecvError::Disconnected) => {
+                unreachable!("receive reserve owns both ends")
+            }
+        };
+        Ok(ReceiveBacking {
+            buffer: Some(buffer),
+            reserve,
+        })
+    }
+}
+
+struct ChargedBytes {
+    bytes: Box<[u8]>,
+    _charge: OwnedSemaphorePermit,
+}
+
+impl ChargedBytes {
+    fn new(mtu: usize, charge: OwnedSemaphorePermit) -> Self {
+        Self {
+            bytes: vec![0_u8; mtu].into_boxed_slice(),
+            _charge: charge,
+        }
+    }
+}
+
+struct ReceiveBacking {
+    buffer: Option<ChargedBytes>,
+    reserve: Weak<ReceiveReserve>,
+}
+
+impl Drop for ReceiveBacking {
+    fn drop(&mut self) {
+        if let Some(reserve) = self.reserve.upgrade() {
+            let buffer = self.buffer.take().expect("receive backing owns its buffer");
+            let _returned = reserve.returning.try_send(buffer);
+        }
+    }
+}
+
+impl fmt::Debug for ReceiveBacking {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReceiveBacking")
+            .field("len", &self.as_slice().len())
+            .finish()
+    }
+}
+
+impl AsMut<[u8]> for ReceiveBacking {
+    fn as_mut(&mut self) -> &mut [u8] {
+        self.buffer
+            .as_mut()
+            .expect("receive backing owns its buffer")
+            .bytes
+            .as_mut()
+    }
+}
+
+impl ZSliceBuffer for ReceiveBacking {
+    fn as_slice(&self) -> &[u8] {
+        self.buffer
+            .as_ref()
+            .expect("receive backing owns its buffer")
+            .bytes
+            .as_ref()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+#[cfg(test)]
+mod receive_budget {
+    use std::{num::NonZeroU32, sync::Arc};
+
+    use tokio::sync::TryAcquireError;
+
+    use super::{ReceiveBudget, ReceiveReserve};
+
+    #[test]
+    fn reserves_and_extra_allocations_share_one_limit() {
+        let batch = 4_096;
+        let budget = ReceiveBudget::new(NonZeroU32::new(12_288).unwrap());
+        let first = Arc::new(ReceiveReserve::new(1, batch, &budget).unwrap());
+        let second = Arc::new(ReceiveReserve::new(1, batch, &budget).unwrap());
+        let first_loan = first.loan(batch, &budget).unwrap();
+        let extra = first.loan(batch, &budget).unwrap();
+        // A free reserved batch can be checked out when new allocation is full.
+        let second_loan = second.loan(batch, &budget).unwrap();
+        let refused = second.loan(batch, &budget).unwrap_err();
+        assert!(matches!(
+            refused.downcast_ref(),
+            Some(TryAcquireError::NoPermits)
+        ));
+        assert_eq!(budget.charged_bytes(), 12_288);
+        assert_eq!(budget.refusals(), 1);
+
+        drop(extra);
+        let replacement = second.loan(batch, &budget).unwrap();
+        assert_eq!(budget.charged_bytes(), 12_288);
+        drop(second_loan);
+        assert_eq!(budget.charged_bytes(), 12_288);
+        let reused = second.loan(batch, &budget).unwrap();
+        assert_eq!(budget.charged_bytes(), 12_288);
+        drop(first);
+        drop(second);
+        assert_eq!(budget.charged_bytes(), 12_288);
+        drop(first_loan);
+        drop(replacement);
+        drop(reused);
+        assert_eq!(budget.charged_bytes(), 0);
+        assert_eq!(budget.refusals(), 1);
+
+        let closing = Arc::new(ReceiveReserve::new(2, batch, &budget).unwrap());
+        let held = closing.loan(batch, &budget).unwrap();
+        assert_eq!(budget.charged_bytes(), 8_192);
+        drop(closing);
+        assert_eq!(budget.charged_bytes(), 4_096);
+        drop(held);
+        assert_eq!(budget.charged_bytes(), 0);
+    }
+}
+
 async fn read_loop<F: Fn() -> Box<[u8]>>(
     priority: Option<Priority>,
     link: &mut TransportLinkUnicastRx,
     transport: TransportUnicastUniversal,
     lease_tracker: TimeoutTracker,
     #[cfg(feature = "stats")] stats: zenoh_stats::LinkStats,
-    pool: &RecyclingObjectPool<Box<[u8]>, F>,
+    pool: &ReceivePool<F>,
 ) -> ZResult<()> {
     async fn read<F: Fn() -> Box<[u8]>>(
         link: &mut TransportLinkUnicastRx,
         priority: Option<Priority>,
-        pool: &RecyclingObjectPool<Box<[u8]>, F>,
+        pool: &ReceivePool<F>,
+        budget: Option<&ReceiveBudget>,
     ) -> ZResult<RBatch<ZSlice>> {
-        let batch = link
-            .recv_batch(|| pool.try_take().unwrap_or_else(|| pool.alloc()), priority)
-            .await?;
-        Ok(batch)
+        match pool {
+            ReceivePool::Recycling(buffers) => {
+                link.recv_batch(
+                    || buffers.try_take().unwrap_or_else(|| buffers.alloc()),
+                    priority,
+                )
+                .await
+            }
+            ReceivePool::Charged(reserve) => {
+                let budget = budget.expect("charged reserve has a receive budget");
+                let buffer = reserve.loan(link.config.batch.mtu as usize, budget)?;
+                link.recv_charged_batch(buffer, priority).await
+            }
+        }
     }
 
     loop {
         tokio::select! {
-            batch = read(link, priority, pool) => {
+            batch = read(link, priority, pool, transport.manager.unicast_receive.as_deref()) => {
                 let batch = batch?;
                 lease_tracker.reset();
                 #[cfg(feature = "stats")]

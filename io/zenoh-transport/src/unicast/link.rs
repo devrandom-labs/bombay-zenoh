@@ -286,9 +286,39 @@ impl TransportLinkUnicastRx {
         C: Fn() -> T + Copy,
         T: AsMut<[u8]> + ZSliceBuffer + 'static,
     {
+        let mut batch = self.read_batch(buff(), priority).await?;
+        batch
+            .initialize(buff)
+            .map_err(|cause| zerror!("Read error from link: {self}. {cause}."))?;
+        Ok(batch)
+    }
+
+    pub(super) async fn recv_charged_batch<T>(
+        &mut self,
+        buffer: T,
+        priority: Option<Priority>,
+    ) -> ZResult<RBatch<ZSlice>>
+    where
+        T: AsMut<[u8]> + ZSliceBuffer + 'static,
+    {
+        let mut batch = self.read_batch(buffer, priority).await?;
+        // Configured receive budgets use the uncompressed decoder.
+        batch
+            .initialize(Box::<[u8]>::default)
+            .map_err(|cause| zerror!("Read error from link: {self}. {cause}."))?;
+        Ok(batch)
+    }
+
+    async fn read_batch<T>(
+        &mut self,
+        mut into: T,
+        priority: Option<Priority>,
+    ) -> ZResult<RBatch<ZSlice>>
+    where
+        T: AsMut<[u8]> + ZSliceBuffer + 'static,
+    {
         const ERR: &str = "Read error from link: ";
 
-        let mut into = (buff)();
         let end = if self.link.is_streamed() {
             // Read and decode the message length
             let mut len = BatchSize::MIN.to_le_bytes();
@@ -307,18 +337,9 @@ impl TransportLinkUnicastRx {
             self.link.read(into.as_mut(), priority).await?
         };
 
-        // tracing::trace!("RBytes: {:02x?}", &into.as_slice()[0..end]);
-
         let buffer = ZSlice::new(Arc::new(into), 0, end)
             .map_err(|_| zerror!("{ERR}{self}. ZSlice index(es) out of bounds"))?;
-        let mut batch = RBatch::new(self.config.batch, buffer);
-        batch
-            .initialize(buff)
-            .map_err(|e| zerror!("{ERR}{self}. {e}."))?;
-
-        // tracing::trace!("RBatch: {:?}", batch);
-
-        Ok(batch)
+        Ok(RBatch::new(self.config.batch, buffer))
     }
 
     pub async fn recv(&mut self) -> ZResult<TransportMessage> {

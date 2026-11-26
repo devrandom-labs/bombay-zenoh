@@ -70,6 +70,20 @@ compiler-floor, Miri, packaged query/config checks and required CI before merge.
 Historical release selections retain their original version maps and refuse a
 conflicting current source. The original partial-release resume remains unchanged.
 
+## Receive-budget successor
+
+`receive-budget-successor` verifies Config and plugin trait `1.10.3`, TLS link,
+link and transport `1.10.5`, and SDK `1.10.11` in Cargo's dependency order.
+All five dependent manifests pin the candidate Config archive. The
+`receive-budget-cohort` uses the existing checksums and source revisions for
+link commons `1.10.2` and both validated-struct `2.2.0` packages.
+
+The source gate exercises allocation refusal, buffer release after TLS close,
+and startup refusal for the incompatible low-latency profile. The package gate
+checks the complete six-archive build, Rustls floor, retired-listener denial,
+and isolated query consumers with the exact locks. Historical release
+selections retain their own version maps and independently verified archives.
+
 ## Review, merge and publication
 
 The controlled repository starts `main` at the exact upstream base. Corrections

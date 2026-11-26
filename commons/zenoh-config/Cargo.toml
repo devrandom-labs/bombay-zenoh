@@ -22,7 +22,7 @@ license-file = { workspace = true }
 name = "bombay-zenoh-config"
 repository = { workspace = true }
 rust-version = "1.88.0"
-version = "1.10.2"
+version = "1.10.3"
 
 [features]
 internal = []

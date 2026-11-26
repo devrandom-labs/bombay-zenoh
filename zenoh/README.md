@@ -39,13 +39,15 @@ Published `1.10.9` requires Rustls `0.23.46` in both owning TLS dependencies.
 Its exact cohort includes link commons `1.10.2`, TLS link/link/transport `1.10.3`,
 Config/plugin `1.10.2` and both validated-struct `2.2.0` archives.
 
-Candidate `1.10.10` delivers the merged TLS stream ownership, sequential incoming
+Published `1.10.10` delivers TLS stream ownership, sequential incoming
 handshake and bounded accepted-link queue corrections through TLS link, link and
 transport `1.10.4`. It removes the unused listener dependency. The five remaining
 controlled archives keep their exact published bytes and source revisions.
-The four candidates declare Rust `1.88.0`; source/archive/compiler-floor checks,
-required CI, reviewed merge, publication and registry-only consumption remain
-gates. These corrections do not establish whole-memory or executor-task bounds.
+Candidate `1.10.11` adds an optional byte ceiling for established universal
+unicast receive backing. `Session::info()` exposes charged bytes and the
+allocation refusal count when the limit is configured. The release pairs the
+SDK with Config and plugin trait `1.10.3` and TLS link, link and transport
+`1.10.5`. Its compiler floor is Rust `1.88.0`.
 
 Published `1.10.2` corrects resource registration for valid leading UTF-8 path
 chunks. Published `1.10.3` retires finalized/disconnected native interest resources

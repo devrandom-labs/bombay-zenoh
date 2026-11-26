@@ -313,6 +313,7 @@ impl Default for LinkRxConf {
     fn default() -> Self {
         Self {
             buffer_size: BatchSize::MAX as usize,
+            unicast_buffer_limit: None,
             max_message_size: 2_usize.pow(30),
         }
     }
