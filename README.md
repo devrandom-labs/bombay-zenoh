@@ -53,7 +53,7 @@ Published `1.10.9` raises both owning Rustls minima to `0.23.46`; its support
 cohort is link commons `1.10.2` and TLS link/link/transport `1.10.3`, retaining
 Config/plugin `1.10.2` and both validated-struct `2.2.0` archives.
 
-Candidate `1.10.10` carries the merged TLS ownership, incoming handshake and
+Published `1.10.10` carries the merged TLS ownership, incoming handshake and
 accepted-link queue corrections. Its four new packages are TLS link, link and
 transport `1.10.4`, followed by top `1.10.10`. The five other controlled archives
 retain their published bytes, checksums and owning source revisions. The unused
@@ -68,12 +68,13 @@ shutdown. Incoming handshakes are sequential within each listener; accepted link
 use the existing bounded channel and retain capacity through rejected-link close.
 These counts do not establish a whole-memory, byte or executor-task quota.
 
-The four candidates declare Rust `1.88.0`. Their own source/archive/compiler-floor
-checks, required CI, reviewed merge, guarded publication and clean registry-only
-consumption remain delivery gates. Merged source alone is not a published release.
-No runtime Rust code, public type, feature or resource default changes in this
-release-selection patch. Historical release kinds and partial-publication custody
-remain available from their exact owning source.
+The receive-budget candidate is `1.10.11`. Its six archives include Config and
+plugin trait `1.10.3`, TLS link, link and transport `1.10.5`, and the SDK itself.
+Applications can set `transport/link/rx/unicast_buffer_limit` to an explicit
+byte ceiling for established universal unicast receive backing. The charge
+follows shared buffers through delivery and link close. The release verifies
+source and archives at the Rust `1.88.0` floor before publication and verifies
+the installed graph again with a registry-only consumer.
 
 Maintainers run both pinned profiles:
 

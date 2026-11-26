@@ -4,7 +4,7 @@ import copy
 import tomllib
 import unittest
 
-from verify_archives import ReleaseKind, TLS_SECURITY_CANDIDATES, TLS_INGRESS_CANDIDATES, version
+from verify_archives import CONFIGURATION_CANDIDATES, ReleaseKind, TLS_SECURITY_CANDIDATES, TLS_INGRESS_CANDIDATES, version
 
 from verify_packaged_queries import QuerySourceProfile, query_release_kind, QUERY_TESTS, ROUTED_QUERY_TESTS, verify_candidate_lock, verify_query_execution, verify_query_profile
 
@@ -95,21 +95,31 @@ class PackagedQueryEvidence(unittest.TestCase):
         verify_candidate_lock(original, execution, candidates)
 
     def test_security_candidates_preserve_versions_original_locks_and_registry_edges(self):
-        for kind in (ReleaseKind.TLS_SECURITY_SUCCESSOR, ReleaseKind.TLS_INGRESS_SUCCESSOR):
+        for kind in (ReleaseKind.TLS_SECURITY_SUCCESSOR, ReleaseKind.TLS_INGRESS_SUCCESSOR, ReleaseKind.RECEIVE_BUDGET_SUCCESSOR):
             manifest = Path("/tmp/packaged/Cargo.toml")
             owner = {"id": "owner", "manifest_path": str(manifest), "dependencies": []}
             expected_versions = {"zenoh-link-commons": "1.10.2", "zenoh-link-tls": "1.10.3",
                                  "zenoh-link": "1.10.3", "zenoh-transport": "1.10.3"}
+            expected_sdk = "1.10.9"
+            selected = TLS_SECURITY_CANDIDATES
+            immutable_owner = "bombay-zenoh-config"
             if kind is ReleaseKind.TLS_INGRESS_SUCCESSOR:
                 expected_versions = {"zenoh-link-tls": "1.10.4", "zenoh-link": "1.10.4", "zenoh-transport": "1.10.4"}
-            selected = TLS_INGRESS_CANDIDATES if kind is ReleaseKind.TLS_INGRESS_SUCCESSOR else TLS_SECURITY_CANDIDATES
+                expected_sdk = "1.10.10"
+                selected = TLS_INGRESS_CANDIDATES
+            elif kind is ReleaseKind.RECEIVE_BUDGET_SUCCESSOR:
+                expected_versions = {"zenoh-config": "1.10.3", "zenoh-plugin-trait": "1.10.3",
+                                     "zenoh-link-tls": "1.10.5", "zenoh-link": "1.10.5", "zenoh-transport": "1.10.5"}
+                expected_sdk = "1.10.11"
+                selected = CONFIGURATION_CANDIDATES
+                immutable_owner = "bombay-zenoh-link-commons"
             self.assertEqual(selected - {"zenoh"}, set(expected_versions))
             sdk_version = version("zenoh", kind)
-            self.assertEqual(sdk_version, "1.10.10" if kind is ReleaseKind.TLS_INGRESS_SUCCESSOR else "1.10.9")
+            self.assertEqual(sdk_version, expected_sdk)
             packages = [{"id": name, "name": "bombay-" + name, "version": expected,
                          "source": None, "manifest_path": "/tmp/" + name + "/Cargo.toml"}
                         for name, expected in sorted(expected_versions.items())]
-            registry = {"id": "config", "name": "bombay-zenoh-config", "version": "1.10.2",
+            registry = {"id": "immutable", "name": immutable_owner, "version": "1.10.2",
                         "source": "registry+https://github.com/rust-lang/crates.io-index"}
             rustls = {"id": "rustls", "name": "rustls", "version": "0.23.46", "source": registry["source"]}
             metadata = {"packages": [owner, *packages, registry, rustls],
@@ -144,17 +154,18 @@ class PackagedQueryEvidence(unittest.TestCase):
                     package.pop("checksum")
             verify_candidate_lock(original, execution, candidates, kind)
             changed = copy.deepcopy(execution)
-            next(package for package in changed["package"] if package["name"] == "bombay-zenoh-config").pop("checksum")
+            next(package for package in changed["package"] if package["name"] == immutable_owner).pop("checksum")
             with self.assertRaisesRegex(AssertionError, "unrelated records"):
                 verify_candidate_lock(original, changed, candidates, kind)
             verify_candidate_lock(original, execution, candidates, kind)
 
     def test_source_profiles_refuse_conflicting_release_kinds(self):
         registry_kind = query_release_kind(QuerySourceProfile.REGISTRY, None)
-        self.assertIs(registry_kind, ReleaseKind.TLS_INGRESS_SUCCESSOR)
+        self.assertIs(registry_kind, ReleaseKind.RECEIVE_BUDGET_SUCCESSOR)
         for profile, expected in ((QuerySourceProfile.CONFIGURATION_COHORT, ReleaseKind.CONFIGURATION_SUCCESSOR),
                                   (QuerySourceProfile.TLS_SECURITY_COHORT, ReleaseKind.TLS_SECURITY_SUCCESSOR),
-                                  (QuerySourceProfile.TLS_INGRESS_COHORT, ReleaseKind.TLS_INGRESS_SUCCESSOR)):
+                                  (QuerySourceProfile.TLS_INGRESS_COHORT, ReleaseKind.TLS_INGRESS_SUCCESSOR),
+                                  (QuerySourceProfile.RECEIVE_BUDGET_COHORT, ReleaseKind.RECEIVE_BUDGET_SUCCESSOR)):
             default_kind = query_release_kind(profile, None)
             self.assertIs(default_kind, expected)
             for kind in ReleaseKind:

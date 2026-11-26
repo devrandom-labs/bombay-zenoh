@@ -4,6 +4,7 @@ set -euo pipefail
 PYTHONDONTWRITEBYTECODE=1 python3 ci/release_cohort_tests.py
 
 # This entrypoint must run through the repository's pinned Nix development shell.
+release_kind="${RELEASE_KIND:-receive-budget-successor}"
 release_packages=(
   bombay-validated-struct-macros bombay-validated-struct
   bombay-zenoh-link-commons bombay-zenoh-config bombay-zenoh-link-tls
@@ -49,6 +50,17 @@ for profile in debug release; do
     api::session::query_identifiers::accepted_queries_keep_their_reply_consumer_at_identifier_exhaustion -- --exact
   cargo test --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib \
     --no-default-features --features transport_tls api::session::query_retirement:: -- --nocapture
+  if [[ "$release_kind" == receive-budget-successor ]]; then
+    receive_budget_status=0
+    receive_budget_output=$(cargo test --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib \
+      --no-default-features --features transport_tls,unstable \
+      api::session::unicast_receive_budget:: -- --test-threads=1) || receive_budget_status=$?
+    printf '%s\n' "$receive_budget_output"
+    [[ "$receive_budget_status" == 0 ]]
+    [[ "$receive_budget_output" == *'test api::session::unicast_receive_budget::tls_receive_backing_stays_charged_until_the_last_owner_releases_it ... ok'* ]]
+    [[ "$receive_budget_output" == *'test api::session::unicast_receive_budget::tls_receive_budget_refuses_unsupported_transport_mode ... ok'* ]]
+    [[ "$receive_budget_output" == *'test result: ok. 2 passed; 0 failed; 0 ignored;'* ]]
+  fi
   cargo test --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib \
     --no-default-features --features transport_tls \
     net::tests::tables::leading_utf8_chunks_preserve_registered_resources -- --exact
@@ -80,8 +92,6 @@ for profile in debug release; do
   done
 done
 
-# Preserve historical cohorts alongside the incoming TLS successor.
-release_kind="${RELEASE_KIND:-tls-ingress-successor}"
 case "$release_kind" in
   configuration-successor)
     successor_packages=(bombay-zenoh-config bombay-zenoh-link-tls
@@ -94,6 +104,10 @@ case "$release_kind" in
   tls-ingress-successor)
     successor_packages=(bombay-zenoh-link-tls bombay-zenoh-link bombay-zenoh-transport bombay-zenoh)
     source_profile=tls-ingress-cohort ;;
+  receive-budget-successor)
+    successor_packages=(bombay-zenoh-config bombay-zenoh-link-tls
+      bombay-zenoh-plugin-trait bombay-zenoh-link bombay-zenoh-transport bombay-zenoh)
+    source_profile=receive-budget-cohort ;;
   *) printf 'Unknown verification cohort\n' >&2; exit 1 ;;
 esac
 successor_arguments=()
