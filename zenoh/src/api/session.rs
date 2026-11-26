@@ -5447,3 +5447,193 @@ mod query_retirement {
         assert!(matches!(continued, Ok(Ok(()))));
     }
 }
+
+#[cfg(all(test, feature = "transport_tls", feature = "unstable"))]
+mod unicast_receive_budget {
+    use std::{
+        num::{NonZeroU32, NonZeroUsize},
+        path::PathBuf,
+        time::Duration,
+    };
+
+    use zenoh_config::{Config, WhatAmI};
+
+    use crate::{handlers::FifoChannel, query::ConsolidationMode, sample::Locality};
+
+    fn tls_configuration() -> Config {
+        let mut config = Config::default();
+        config.set_mode(Some(WhatAmI::Peer)).unwrap();
+        config.scouting.multicast.set_enabled(Some(false)).unwrap();
+        config.scouting.gossip.set_enabled(Some(false)).unwrap();
+        config.listen.endpoints.set(Vec::new()).unwrap();
+        config.connect.endpoints.set(Vec::new()).unwrap();
+        config
+            .set_queries_max_retained(NonZeroUsize::new(2))
+            .unwrap();
+        let fixtures =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/declaration-pressure");
+        for (field, file) in [
+            ("root_ca_certificate", "root-ca.pem"),
+            ("listen_certificate", "localhost-certificate.pem"),
+            ("listen_private_key", "localhost-private-key.pem"),
+            ("connect_certificate", "localhost-certificate.pem"),
+            ("connect_private_key", "localhost-private-key.pem"),
+        ] {
+            config
+                .insert_json5(
+                    &format!("transport/link/tls/{field}"),
+                    &serde_json::to_string(&fixtures.join(file)).unwrap(),
+                )
+                .unwrap();
+        }
+        config
+            .insert_json5("transport/link/tls/enable_mtls", "true")
+            .unwrap();
+        config
+            .insert_json5("transport/link/tls/verify_name_on_connect", "true")
+            .unwrap();
+        config
+            .insert_json5("transport/link/tls/use_public_pki", "false")
+            .unwrap();
+        config
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn tls_receive_budget_refuses_unsupported_transport_mode() {
+        let mut config = tls_configuration();
+        config.transport.unicast.set_lowlatency(true).unwrap();
+        config.transport.unicast.qos.set_enabled(false).unwrap();
+        config
+            .transport
+            .link
+            .rx
+            .set_unicast_buffer_limit(NonZeroU32::new(32_768))
+            .unwrap();
+        let opened = crate::open(config).await;
+        let cause = match opened {
+            Err(cause) => cause,
+            Ok(session) => {
+                session.close().await.unwrap();
+                panic!("receive budget is unsupported in low-latency mode");
+            }
+        };
+        assert!(cause
+            .to_string()
+            .contains("Unsupported unicast receive buffer limit"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn tls_receive_backing_stays_charged_until_the_last_owner_releases_it() {
+        let batch_bytes = 4_096;
+        let mut receiving = tls_configuration();
+        receiving
+            .listen
+            .endpoints
+            .set(vec!["tls/localhost:0".parse().unwrap()])
+            .unwrap();
+        receiving
+            .transport
+            .link
+            .tx
+            .set_batch_size(batch_bytes)
+            .unwrap();
+        receiving
+            .transport
+            .link
+            .rx
+            .set_buffer_size(batch_bytes as usize)
+            .unwrap();
+        receiving
+            .transport
+            .link
+            .rx
+            .set_unicast_buffer_limit(NonZeroU32::new(32_768))
+            .unwrap();
+        let receiver = crate::open(receiving).await.unwrap();
+        let info = receiver.info();
+        let initially_charged = info.unicast_receive_bytes();
+        let locators = receiver.runtime().static_runtime().unwrap().get_locators();
+        let [locator] = locators.as_slice() else {
+            panic!("one actual TLS listener")
+        };
+        let locator = locator.to_string();
+        let endpoint = format!("tls/localhost:{}", locator.rsplit(':').next().unwrap());
+
+        let key = "receive/backing";
+        let queryable = receiver
+            .declare_queryable(key)
+            .allowed_origin(Locality::Remote)
+            .with(FifoChannel::new(1))
+            .await
+            .unwrap();
+        let mut sending = tls_configuration();
+        sending
+            .connect
+            .endpoints
+            .set(vec![endpoint.parse().unwrap()])
+            .unwrap();
+        sending
+            .transport
+            .link
+            .tx
+            .set_batch_size(batch_bytes)
+            .unwrap();
+        let sender = crate::open(sending).await.unwrap();
+        let querier = sender
+            .declare_querier(key)
+            .allowed_destination(Locality::Remote)
+            .consolidation(ConsolidationMode::None)
+            .await
+            .unwrap();
+        let matching = querier
+            .matching_listener()
+            .with(FifoChannel::new(2))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !matching.recv_async().await.unwrap().matching() {}
+        })
+        .await
+        .unwrap();
+        let _replies = querier
+            .get()
+            .payload(*b"retained TLS payload")
+            .await
+            .unwrap();
+        let query = tokio::time::timeout(Duration::from_secs(5), queryable.recv_async())
+            .await
+            .unwrap()
+            .unwrap();
+        let first = query.payload().unwrap().clone();
+        let last = first.clone();
+        drop(query);
+        let _later_replies = querier.get().payload(*b"second TLS payload").await.unwrap();
+        let later_query = tokio::time::timeout(Duration::from_secs(5), queryable.recv_async())
+            .await
+            .unwrap()
+            .unwrap();
+        let later_payload = later_query.payload().unwrap().clone();
+        drop(later_query);
+
+        receiver.close().await.unwrap();
+        sender.close().await.unwrap();
+        let charged_after_close = info.unicast_receive_bytes();
+        drop(first);
+        let charged_with_one_owner = info.unicast_receive_bytes();
+        let exact_payload = last.to_bytes().into_owned();
+        drop(last);
+        let charged_with_later_payload = info.unicast_receive_bytes();
+        let exact_later_payload = later_payload.to_bytes().into_owned();
+        drop(later_payload);
+        let charged_without_owners = info.unicast_receive_bytes();
+
+        assert_eq!(initially_charged, Some(0));
+        assert_eq!(charged_after_close, Some(2 * u32::from(batch_bytes)));
+        assert_eq!(charged_with_one_owner, charged_after_close);
+        assert_eq!(exact_payload, b"retained TLS payload");
+        assert_eq!(charged_with_later_payload, Some(u32::from(batch_bytes)));
+        assert_eq!(exact_later_payload, b"second TLS payload");
+        assert_eq!(charged_without_owners, Some(0));
+        assert_eq!(info.unicast_receive_refusals(), Some(0));
+    }
+}

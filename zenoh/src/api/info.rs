@@ -61,6 +61,30 @@ impl std::fmt::Debug for SessionInfo {
 }
 
 impl SessionInfo {
+    /// Bytes charged to this session's established unicast receive budget.
+    ///
+    /// Includes reserved buffers and batches held by consumers. Returns `None`
+    /// when the budget is disabled or this session does not own its transport.
+    pub fn unicast_receive_bytes(&self) -> Option<u32> {
+        self.session
+            .runtime()
+            .static_runtime()?
+            .manager()
+            .unicast_receive_bytes()
+    }
+
+    /// Saturating count of refused unicast receive reservations and allocations.
+    ///
+    /// A refusal does not identify a request. Returns `None` when the budget
+    /// is disabled or this session does not own its transport.
+    pub fn unicast_receive_refusals(&self) -> Option<u64> {
+        self.session
+            .runtime()
+            .static_runtime()?
+            .manager()
+            .unicast_receive_refusals()
+    }
+
     /// Return the [`ZenohId`](crate::session::ZenohId) of the current zenoh [`Session`](crate::Session).
     ///
     /// # Examples
