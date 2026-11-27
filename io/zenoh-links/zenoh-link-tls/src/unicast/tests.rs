@@ -1,5 +1,6 @@
 use super::{
-    accept_task, get_client_cert_common_name, get_server_cert_common_name, LinkUnicastTls,
+    accept_task, get_client_cert_common_name, get_server_cert_common_name, LinkManagerUnicastTls,
+    LinkUnicastTls,
 };
 use crate::utils::{TlsClientConfig, TlsServerConfig};
 use std::{
@@ -15,6 +16,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::Semaphore,
     time::timeout,
 };
 use tokio_rustls::{
@@ -28,7 +30,7 @@ use tracing::{
     span::{Attributes, Id, Record},
     Event, Level, Metadata, Subscriber,
 };
-use zenoh_link_commons::{LinkAuthId, LinkUnicastTrait};
+use zenoh_link_commons::{LinkAuthId, LinkManagerUnicastTrait, LinkUnicastTrait};
 use zenoh_protocol::core::EndPoint;
 use zenoh_result::ZResult;
 use zenoh_runtime::ZRuntime;
@@ -36,7 +38,7 @@ use zenoh_runtime::ZRuntime;
 // Explicit finite test guard; no native/production IO default.
 const TLS_IO_WAIT: Duration = Duration::from_secs(5);
 
-async fn connected_tls_links() -> ZResult<(LinkUnicastTls, LinkUnicastTls)> {
+fn tls_endpoint(address: &str) -> ZResult<EndPoint> {
     let certificates = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tls-ownership");
     let ca = certificates.join("root-ca.pem");
     let certificate = certificates.join("localhost-certificate.pem");
@@ -45,7 +47,11 @@ async fn connected_tls_links() -> ZResult<(LinkUnicastTls, LinkUnicastTls)> {
         "root_ca_certificate_file={};listen_certificate_file={};listen_private_key_file={};connect_certificate_file={};connect_private_key_file={};enable_mtls=true;verify_name_on_connect=true;use_public_pki=false",
         ca.display(), certificate.display(), key.display(), certificate.display(), key.display()
     );
-    let endpoint = EndPoint::new("tls", "localhost:0", "", configuration)?;
+    EndPoint::new("tls", address, "", configuration)
+}
+
+async fn connected_tls_links() -> ZResult<(LinkUnicastTls, LinkUnicastTls)> {
+    let endpoint = tls_endpoint("localhost:0")?;
     let supplied = endpoint.config();
     let client = TlsClientConfig::new(&supplied).await?;
     let server = TlsServerConfig::new(&supplied).await?;
@@ -75,6 +81,7 @@ async fn connected_tls_links() -> ZResult<(LinkUnicastTls, LinkUnicastTls)> {
             client_target,
             client_auth.into(),
             None,
+            None,
         ),
         LinkUnicastTls::new(
             TlsStream::Server(accepted),
@@ -82,8 +89,71 @@ async fn connected_tls_links() -> ZResult<(LinkUnicastTls, LinkUnicastTls)> {
             server_target,
             server_auth.into(),
             None,
+            None,
         ),
     ))
+}
+
+#[test]
+fn tls_slots_follow_both_streams_through_close_and_final_release() {
+    ZRuntime::Application.block_on(async {
+        timeout(TLS_IO_WAIT, async {
+            let (publication, incoming) = flume::bounded(1);
+            let listening_slots = Arc::new(Semaphore::new(1));
+            let calling_slots = Arc::new(Semaphore::new(1));
+            let listener = LinkManagerUnicastTls::with_connection_limit(
+                publication.clone(),
+                Arc::clone(&listening_slots),
+            );
+            let caller = LinkManagerUnicastTls::with_connection_limit(
+                publication,
+                Arc::clone(&calling_slots),
+            );
+            let slots = || {
+                [
+                    listening_slots.available_permits(),
+                    calling_slots.available_permits(),
+                ]
+            };
+            let locator = listener
+                .new_listener(tls_endpoint("localhost:0").unwrap())
+                .await
+                .unwrap();
+            let address = locator.address();
+            let port = address.as_str().rsplit(':').next().unwrap();
+            let endpoint = tls_endpoint(&format!("localhost:{port}")).unwrap();
+            let idle = slots();
+            let outgoing = caller.new_link(endpoint.clone()).await.unwrap();
+            let accepted = incoming.recv_async().await.unwrap();
+            let live = slots();
+            let outgoing_owner = outgoing.clone();
+            let accepted_owner = accepted.clone();
+            let closed = tokio::join!(outgoing.close(), accepted.close());
+            drop((outgoing, accepted));
+            let held = slots();
+            drop((outgoing_owner, accepted_owner));
+            let released = slots();
+            let replacement = caller.new_link(endpoint.clone()).await.unwrap();
+            let accepted = incoming.recv_async().await.unwrap();
+            let replacement_slots = slots();
+            let replaced = tokio::join!(replacement.close(), accepted.close());
+            drop((replacement, accepted));
+            let final_slots = slots();
+            let listener_closed = listener.del_listener(&endpoint).await;
+
+            closed.0.unwrap();
+            closed.1.unwrap();
+            replaced.0.unwrap();
+            replaced.1.unwrap();
+            listener_closed.unwrap();
+            assert_eq!(
+                [idle, live, held, released, replacement_slots, final_slots],
+                [[1, 1], [0, 0], [0, 0], [1, 1], [0, 0], [1, 1]],
+            );
+        })
+        .await
+        .expect("the finite TLS connection lifetime check completes");
+    });
 }
 
 #[test]
@@ -291,6 +361,7 @@ fn observe_first_handshake(observation: HandshakeObservation) {
                 TlsAcceptor::from(Arc::new(server.server_config)),
                 token.clone(),
                 publication,
+                None,
                 HANDSHAKE_WAIT,
                 server.tls_close_link_on_expiration,
             ));
@@ -580,7 +651,7 @@ fn listener_stop_retires_full_handoff_and_preserves_queued_original() {
             let diagnostics = Dispatch::new(Arc::clone(&accepted));
             let mut listening = Box::pin(accept_task(
                 listener, TlsAcceptor::from(Arc::new(server.server_config)),
-                token.clone(), publication, HANDSHAKE_WAIT, server.tls_close_link_on_expiration,
+                token.clone(), publication, None, HANDSHAKE_WAIT, server.tls_close_link_on_expiration,
             ));
             let mut listener_result = None;
             let mut first_client = None;

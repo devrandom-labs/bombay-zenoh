@@ -63,9 +63,12 @@ class ReleaseKind(enum.Enum):
     TLS_SECURITY_SUCCESSOR = "tls-security-successor"
     TLS_INGRESS_SUCCESSOR = "tls-ingress-successor"
     RECEIVE_BUDGET_SUCCESSOR = "receive-budget-successor"
+    TLS_LIFETIME_SUCCESSOR = "tls-lifetime-successor"
 
 
-TLS_INGRESS_RELEASES = {ReleaseKind.TLS_INGRESS_SUCCESSOR, ReleaseKind.RECEIVE_BUDGET_SUCCESSOR}
+RECEIVE_BUDGET_RELEASES = {ReleaseKind.RECEIVE_BUDGET_SUCCESSOR, ReleaseKind.TLS_LIFETIME_SUCCESSOR}
+CONFIGURATION_RELEASES = {ReleaseKind.CONFIGURATION_SUCCESSOR} | RECEIVE_BUDGET_RELEASES
+TLS_INGRESS_RELEASES = {ReleaseKind.TLS_INGRESS_SUCCESSOR} | RECEIVE_BUDGET_RELEASES
 TLS_SECURITY_RELEASES = {ReleaseKind.TLS_SECURITY_SUCCESSOR} | TLS_INGRESS_RELEASES
 
 
@@ -113,7 +116,7 @@ def identity(owner):
 
 
 def published_dependencies(release_kind):
-    if release_kind is ReleaseKind.RECEIVE_BUDGET_SUCCESSOR:
+    if release_kind in RECEIVE_BUDGET_RELEASES:
         return {owner: TLS_INGRESS_PUBLISHED_DEPENDENCIES[owner]
                 for owner in published_owners(release_kind)}
     if release_kind is ReleaseKind.TLS_INGRESS_SUCCESSOR:
@@ -134,7 +137,7 @@ def published_owners(release_kind):
         return set(EDGES) - TLS_INGRESS_CANDIDATES
     if release_kind is ReleaseKind.TLS_SECURITY_SUCCESSOR:
         return set(EDGES) - TLS_SECURITY_CANDIDATES
-    if release_kind in {ReleaseKind.CONFIGURATION_SUCCESSOR, ReleaseKind.RECEIVE_BUDGET_SUCCESSOR}:
+    if release_kind in CONFIGURATION_RELEASES:
         return set(EDGES) - CONFIGURATION_CANDIDATES
     if release_kind is ReleaseKind.ZENOH_SUCCESSOR:
         return set(PUBLISHED_DEPENDENCIES)
@@ -142,6 +145,14 @@ def published_owners(release_kind):
 
 
 def version(owner, release_kind=ReleaseKind.INITIAL_COHORT):
+    if release_kind is ReleaseKind.TLS_LIFETIME_SUCCESSOR:
+        if owner in CONFIGURATION_CANDIDATES:
+            return {
+                "zenoh-config": "1.10.4", "zenoh-plugin-trait": "1.10.4",
+                "zenoh-link-tls": "1.10.6", "zenoh-link": "1.10.6", "zenoh-transport": "1.10.6",
+                "zenoh": "1.10.12",
+            }[owner]
+        return version(owner, ReleaseKind.RECEIVE_BUDGET_SUCCESSOR)
     if release_kind is ReleaseKind.RECEIVE_BUDGET_SUCCESSOR:
         if owner in CONFIGURATION_CANDIDATES:
             return {
@@ -178,7 +189,7 @@ def verify_manifest(owner, manifest, release_kind=ReleaseKind.INITIAL_COHORT):
     require(manifest["lib"]["name"] == owner.replace("-", "_"), f"{owner}: library identity")
     require(package["repository"] == CONTROLLED_REPOSITORY, f"{owner}: repository")
     require(package["license"] == "EPL-2.0 OR Apache-2.0", f"{owner}: license expression")
-    if (release_kind in {ReleaseKind.CONFIGURATION_SUCCESSOR, ReleaseKind.RECEIVE_BUDGET_SUCCESSOR} and owner in CONFIGURATION_CANDIDATES
+    if (release_kind in CONFIGURATION_RELEASES and owner in CONFIGURATION_CANDIDATES
             or release_kind in TLS_SECURITY_RELEASES and owner in TLS_SECURITY_CANDIDATES):
         require(package.get("rust-version") == "1.88.0", f"{owner}: verified compiler floor")
     if owner in {"zenoh-link-commons", "zenoh-link-tls"}:

@@ -15,11 +15,12 @@ compiler_version=$(rustc --version)
 
 packages=(bombay-zenoh-config bombay-zenoh-link-tls bombay-zenoh-plugin-trait
           bombay-zenoh-link bombay-zenoh-transport bombay-zenoh)
-case "${RELEASE_KIND:-receive-budget-successor}" in
+case "${RELEASE_KIND:-tls-lifetime-successor}" in
   configuration-successor) source_profile=configuration-cohort ;;
   tls-security-successor) packages+=(bombay-zenoh-link-commons); source_profile=tls-security-cohort ;;
   tls-ingress-successor) packages+=(bombay-zenoh-link-commons); source_profile=tls-ingress-cohort ;;
   receive-budget-successor) packages+=(bombay-zenoh-link-commons); source_profile=receive-budget-cohort ;;
+  tls-lifetime-successor) packages+=(bombay-zenoh-link-commons); source_profile=tls-lifetime-cohort ;;
   *) printf 'Unknown compiler-floor cohort\n' >&2; exit 1 ;;
 esac
 package_arguments=()

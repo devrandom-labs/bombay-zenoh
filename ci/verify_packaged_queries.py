@@ -41,17 +41,20 @@ class QuerySourceProfile(enum.Enum):
     TLS_SECURITY_COHORT = "tls-security-cohort"
     TLS_INGRESS_COHORT = "tls-ingress-cohort"
     RECEIVE_BUDGET_COHORT = "receive-budget-cohort"
+    TLS_LIFETIME_COHORT = "tls-lifetime-cohort"
 
 
 def query_release_kind(source_profile, selected_kind):
     allowed = {
         QuerySourceProfile.REGISTRY: (ReleaseKind.INITIAL_COHORT, ReleaseKind.ZENOH_SUCCESSOR,
                                      ReleaseKind.CONFIGURATION_SUCCESSOR, ReleaseKind.TLS_SECURITY_SUCCESSOR,
-                                     ReleaseKind.TLS_INGRESS_SUCCESSOR, ReleaseKind.RECEIVE_BUDGET_SUCCESSOR),
+                                     ReleaseKind.TLS_INGRESS_SUCCESSOR, ReleaseKind.RECEIVE_BUDGET_SUCCESSOR,
+                                     ReleaseKind.TLS_LIFETIME_SUCCESSOR),
         QuerySourceProfile.CONFIGURATION_COHORT: (ReleaseKind.CONFIGURATION_SUCCESSOR,),
         QuerySourceProfile.TLS_SECURITY_COHORT: (ReleaseKind.TLS_SECURITY_SUCCESSOR,),
         QuerySourceProfile.TLS_INGRESS_COHORT: (ReleaseKind.TLS_INGRESS_SUCCESSOR,),
         QuerySourceProfile.RECEIVE_BUDGET_COHORT: (ReleaseKind.RECEIVE_BUDGET_SUCCESSOR,),
+        QuerySourceProfile.TLS_LIFETIME_COHORT: (ReleaseKind.TLS_LIFETIME_SUCCESSOR,),
     }
     kind = allowed[source_profile][-1] if selected_kind is None else selected_kind
     assert kind in allowed[source_profile], "query source profile and release kind conflict"

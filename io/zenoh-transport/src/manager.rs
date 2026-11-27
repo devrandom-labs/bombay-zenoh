@@ -14,7 +14,7 @@
 use std::{
     collections::HashMap,
     fmt,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -263,6 +263,8 @@ pub struct TransportManagerParams {
     config: TransportManagerConfig,
     state: TransportManagerState,
     unicast_buffer_limit: Option<NonZeroU32>,
+    #[cfg(feature = "transport_tls")]
+    tls_connection_limit: Option<NonZeroUsize>,
 }
 
 impl fmt::Debug for TransportManagerParams {
@@ -290,6 +292,7 @@ pub struct TransportManagerBuilder {
     defrag_buff_size: usize,
     link_rx_buffer_size: usize,
     unicast_buffer_limit: Option<NonZeroU32>,
+    tls_connection_limit: Option<NonZeroUsize>,
     unicast: TransportManagerBuilderUnicast,
     multicast: TransportManagerBuilderMulticast,
     link_configs: HashMap<LinkKind, String>, // (protocol, config)
@@ -483,6 +486,7 @@ impl TransportManagerBuilder {
         self = self.defrag_buff_size(*link.rx().max_message_size());
         self = self.link_rx_buffer_size(*link.rx().buffer_size());
         self.unicast_buffer_limit = *link.rx().unicast_buffer_limit();
+        self.tls_connection_limit = *link.tls().max_connections();
         self = self.wait_before_drop(duration_from_i64us(*cc_drop.wait_before_drop()));
         self = self.max_wait_before_drop_fragments(duration_from_i64us(
             *cc_drop.max_wait_before_drop_fragments(),
@@ -538,6 +542,11 @@ impl TransportManagerBuilder {
                 || cfg!(feature = "transport_compression")
         }) {
             bail!("Unsupported unicast receive buffer limit for this transport configuration");
+        }
+        if self.tls_connection_limit.is_some_and(|limit| {
+            limit.get() > Semaphore::MAX_PERMITS || !cfg!(feature = "transport_tls")
+        }) {
+            bail!("Unsupported TLS connection limit for this transport configuration");
         }
 
         let mut queue_size = [0; Priority::NUM];
@@ -623,6 +632,8 @@ impl TransportManagerBuilder {
             config,
             state,
             unicast_buffer_limit: self.unicast_buffer_limit,
+            #[cfg(feature = "transport_tls")]
+            tls_connection_limit: self.tls_connection_limit,
         };
 
         Ok(TransportManager::new(
@@ -670,6 +681,7 @@ impl Default for TransportManagerBuilder {
             defrag_buff_size: *link_rx.max_message_size(),
             link_rx_buffer_size: *link_rx.buffer_size(),
             unicast_buffer_limit: *link_rx.unicast_buffer_limit(),
+            tls_connection_limit: None,
             link_configs: HashMap::new(),
             unicast: TransportManagerBuilderUnicast::default(),
             multicast: TransportManagerBuilderMulticast::default(),
@@ -690,6 +702,8 @@ pub struct TransportManager {
     pub config: Arc<TransportManagerConfig>,
     pub(crate) state: Arc<TransportManagerState>,
     pub(crate) unicast_receive: Option<Arc<ReceiveBudget>>,
+    #[cfg(feature = "transport_tls")]
+    pub(crate) tls_connections: Option<Arc<Semaphore>>,
     pub(crate) prng: Arc<AsyncMutex<PseudoRng>>,
     pub(crate) cipher: Arc<BlockCipher>,
     pub(crate) locator_inspector: zenoh_link::LocatorInspector,
@@ -752,6 +766,10 @@ impl TransportManager {
             unicast_receive: params
                 .unicast_buffer_limit
                 .map(|limit| Arc::new(ReceiveBudget::new(limit))),
+            #[cfg(feature = "transport_tls")]
+            tls_connections: params
+                .tls_connection_limit
+                .map(|limit| Arc::new(Semaphore::new(limit.get()))),
             prng: Arc::new(AsyncMutex::new(prng)),
             cipher: Arc::new(cipher),
             locator_inspector: Default::default(),
