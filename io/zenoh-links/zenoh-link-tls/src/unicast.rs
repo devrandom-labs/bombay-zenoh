@@ -26,7 +26,7 @@ use time::OffsetDateTime;
 use tokio::{
     io::{split, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
     net::{TcpListener, TcpStream},
-    sync::Mutex as AsyncMutex,
+    sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore, TryAcquireError},
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
 use tokio_util::sync::CancellationToken;
@@ -69,6 +69,8 @@ pub struct LinkUnicastTls {
     auth_identifier: LinkAuthId,
     mtu: BatchSize,
     expiration_manager: Option<LinkCertExpirationManager>,
+    // Drop after the reader and writer release the original stream.
+    _connection: Option<OwnedSemaphorePermit>,
 }
 
 impl LinkUnicastTls {
@@ -78,6 +80,7 @@ impl LinkUnicastTls {
         dst_addr: SocketAddr,
         auth_identifier: LinkAuthId,
         expiration_manager: Option<LinkCertExpirationManager>,
+        connection: Option<OwnedSemaphorePermit>,
     ) -> LinkUnicastTls {
         let (tcp_stream, _) = socket.get_ref();
         // Set the TLS nodelay option
@@ -138,6 +141,7 @@ impl LinkUnicastTls {
             auth_identifier,
             mtu,
             expiration_manager,
+            _connection: connection,
         }
     }
 
@@ -275,6 +279,7 @@ impl fmt::Debug for LinkUnicastTls {
 pub struct LinkManagerUnicastTls {
     manager: NewLinkChannelSender,
     listeners: ListenersUnicastIP,
+    connections: Option<Arc<Semaphore>>,
 }
 
 impl fmt::Debug for LinkManagerUnicastTls {
@@ -291,13 +296,34 @@ impl LinkManagerUnicastTls {
         Self {
             manager,
             listeners: ListenersUnicastIP::new(),
+            connections: None,
         }
     }
+
+    /// Share one connection limit across the TLS managers of a session.
+    pub fn with_connection_limit(
+        manager: NewLinkChannelSender,
+        connections: Arc<Semaphore>,
+    ) -> Self {
+        Self {
+            connections: Some(connections),
+            ..Self::new(manager)
+        }
+    }
+}
+
+fn reserve_connection(
+    connections: Option<&Arc<Semaphore>>,
+) -> Result<Option<OwnedSemaphorePermit>, TryAcquireError> {
+    connections
+        .map(|connections| Arc::clone(connections).try_acquire_owned())
+        .transpose()
 }
 
 #[async_trait]
 impl LinkManagerUnicastTrait for LinkManagerUnicastTls {
     async fn new_link(&self, endpoint: EndPoint) -> ZResult<LinkUnicast> {
+        let connection = reserve_connection(self.connections.as_ref())?;
         let epaddr = endpoint.address();
         let epconf = endpoint.config();
 
@@ -370,6 +396,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTls {
                 dst_addr,
                 auth_identifier.into(),
                 expiration_manager,
+                connection,
             )
         });
 
@@ -403,6 +430,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTls {
             let acceptor = TlsAcceptor::from(Arc::new(tls_server_config.server_config));
             let token = token.clone();
             let manager = self.manager.clone();
+            let connections = self.connections.clone();
 
             async move {
                 accept_task(
@@ -410,6 +438,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTls {
                     acceptor,
                     token,
                     manager,
+                    connections,
                     tls_server_config.tls_handshake_timeout,
                     tls_server_config.tls_close_link_on_expiration,
                 )
@@ -462,6 +491,7 @@ async fn accept_task(
     acceptor: TlsAcceptor,
     token: CancellationToken,
     manager: NewLinkChannelSender,
+    connections: Option<Arc<Semaphore>>,
     tls_handshake_timeout: Duration,
     tls_close_link_on_expiration: bool,
 ) -> ZResult<()> {
@@ -479,6 +509,13 @@ async fn accept_task(
             res = socket.accept() => {
                 match res {
                     Ok((tcp_stream, dst_addr)) => {
+                        let connection = match reserve_connection(connections.as_ref()) {
+                            Ok(connection) => connection,
+                            Err(cause) => {
+                                tracing::debug!("Refused TLS connection from {dst_addr}: {cause}");
+                                continue;
+                            }
+                        };
                         // This listener retains one handshake until handoff or rejection.
                         let handshake = tokio::select! {
                             _ = token.cancelled() => break,
@@ -491,11 +528,13 @@ async fn accept_task(
                             Ok(Ok(stream)) => stream,
                             Ok(Err(cause)) => {
                                 tracing::warn!("TLS handshake from {dst_addr} failed: {cause}");
+                                drop(connection);
                                 tokio::time::sleep(Duration::from_micros(*TLS_ACCEPT_THROTTLE_TIME)).await;
                                 continue;
                             }
                             Err(cause) => {
                                 tracing::warn!("TLS handshake from {dst_addr} timed out: {cause}");
+                                drop(connection);
                                 tokio::time::sleep(Duration::from_micros(*TLS_ACCEPT_THROTTLE_TIME)).await;
                                 continue;
                             }
@@ -556,6 +595,7 @@ async fn accept_task(
                                 dst_addr,
                                 auth_identifier.into(),
                                 expiration_manager,
+                                connection,
                             )
                         });
 

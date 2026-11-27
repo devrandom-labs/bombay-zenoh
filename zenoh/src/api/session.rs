@@ -5449,6 +5449,111 @@ mod query_retirement {
 }
 
 #[cfg(all(test, feature = "transport_tls", feature = "unstable"))]
+mod tls_connections {
+    use std::{num::NonZeroUsize, time::Duration};
+
+    use tokio::sync::Semaphore;
+    use zenoh_config::{Config, WhatAmI};
+
+    use super::unicast_receive_budget::tls_configuration;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn oversized_tls_connection_limit_refuses_startup() {
+        let oversized = Semaphore::MAX_PERMITS + 1;
+        let input = serde_json::json!({
+            "mode": "peer",
+            "listen": { "endpoints": [] },
+            "connect": { "endpoints": [] },
+            "scouting": {
+                "multicast": { "enabled": false },
+                "gossip": { "enabled": false }
+            },
+            "transport": { "link": { "tls": { "max_connections": oversized } } }
+        });
+        let config: Config = serde_json::from_value(input).unwrap();
+        let opened = crate::open(config).await;
+        let cause = match opened {
+            Err(cause) => cause,
+            Ok(session) => {
+                session.close().await.unwrap();
+                panic!("the oversized TLS connection limit must refuse startup");
+            }
+        };
+        assert!(cause
+            .to_string()
+            .contains("Unsupported TLS connection limit"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn tls_connection_capacity_preserves_the_connected_peer() {
+        for limit in [1, 2] {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let mut listening = tls_configuration();
+                listening.set_mode(Some(WhatAmI::Router)).unwrap();
+                listening
+                    .listen
+                    .endpoints
+                    .set(vec!["tls/localhost:0".parse().unwrap()])
+                    .unwrap();
+                listening
+                    .transport
+                    .link
+                    .tls
+                    .set_max_connections(NonZeroUsize::new(limit))
+                    .unwrap();
+                let router = crate::open(listening).await.unwrap();
+                let [locator]: [_; 1] = router.info().locators().await.try_into().unwrap();
+                let address = locator.address();
+                let port = address.as_str().rsplit(':').next().unwrap();
+                let endpoint = format!("tls/localhost:{port}");
+                let connect = || {
+                    let mut config = tls_configuration();
+                    config.set_mode(Some(WhatAmI::Client)).unwrap();
+                    config
+                        .connect
+                        .endpoints
+                        .set(vec![endpoint.parse().unwrap()])
+                        .unwrap();
+                    crate::open(config)
+                };
+
+                let client = connect().await.unwrap();
+                let initial: Vec<_> = router.info().links().await.collect();
+                let [original]: [_; 1] = initial.try_into().unwrap();
+                let extra = connect().await;
+                let connected: Vec<_> = router.info().links().await.collect();
+                let extra = match extra {
+                    Ok(extra) => Ok((extra.zid(), extra.close().await)),
+                    Err(refusal) => Err(refusal),
+                };
+                let client_closed = client.close().await;
+                let router_closed = router.close().await;
+
+                match (limit, extra) {
+                    (1, Err(_)) => assert_eq!(connected, [original]),
+                    (2, Ok((added, closed))) => {
+                        assert_eq!(connected.len(), 2);
+                        assert!(connected.contains(&original));
+                        assert_ne!(*original.zid(), added);
+                        assert!(connected.iter().any(|link| *link.zid() == added));
+                        closed.unwrap();
+                    }
+                    (limit, extra) => {
+                        panic!(
+                            "unexpected extra TLS connection outcome at limit {limit}: {extra:?}"
+                        )
+                    }
+                }
+                client_closed.unwrap();
+                router_closed.unwrap();
+            })
+            .await
+            .expect("the finite TLS connection capacity check completes");
+        }
+    }
+}
+
+#[cfg(all(test, feature = "transport_tls", feature = "unstable"))]
 mod unicast_receive_budget {
     use std::{
         num::{NonZeroU32, NonZeroUsize},
@@ -5460,7 +5565,7 @@ mod unicast_receive_budget {
 
     use crate::{handlers::FifoChannel, query::ConsolidationMode, sample::Locality};
 
-    fn tls_configuration() -> Config {
+    pub(super) fn tls_configuration() -> Config {
         let mut config = Config::default();
         config.set_mode(Some(WhatAmI::Peer)).unwrap();
         config.scouting.multicast.set_enabled(Some(false)).unwrap();

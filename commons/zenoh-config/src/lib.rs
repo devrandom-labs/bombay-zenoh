@@ -601,7 +601,7 @@ validated_struct::validator! {
         /// A nonzero value cannot exceed Tokio's Semaphore::MAX_PERMITS. Omission
         /// preserves unbounded compatibility; this limit is fixed when a Session opens.
         /// Separate liveliness queries are outside this limit.
-        queries_max_retained: Option<NonZeroUsize> where (queries_max_retained_validator),
+        queries_max_retained: Option<NonZeroUsize> where (semaphore_limit_validator),
 
         /// The routing strategy to use and it's configuration.
         pub routing: #[derive(Default)]
@@ -789,6 +789,10 @@ validated_struct::validator! {
                 },
                 pub tls: #[derive(Default)]
                 TLSConf {
+                    /// Session-wide limit on TLS connections through final stream release.
+                    /// Includes handshakes, active links, and links still owned during close.
+                    /// Omission leaves the connection count unrestricted by this setting.
+                    max_connections: Option<NonZeroUsize> where (semaphore_limit_validator),
                     root_ca_certificate: Option<String>,
                     listen_private_key: Option<String>,
                     listen_certificate: Option<String>,
@@ -1598,7 +1602,7 @@ fn config_from_json() {
     println!("{}", serde_json::to_string_pretty(&config).unwrap());
 }
 
-fn queries_max_retained_validator(limit: &Option<NonZeroUsize>) -> bool {
+fn semaphore_limit_validator(limit: &Option<NonZeroUsize>) -> bool {
     match limit {
         Some(limit) => limit.get() <= Semaphore::MAX_PERMITS,
         None => true,
