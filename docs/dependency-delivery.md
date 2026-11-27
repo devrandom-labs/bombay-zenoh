@@ -84,6 +84,14 @@ checks the complete six-archive build, Rustls floor, retired-listener denial,
 and isolated query consumers with the exact locks. Historical release
 selections retain their own version maps and independently verified archives.
 
+## TLS connection lifetime successor
+
+`tls-lifetime-successor` verifies Config and plugin trait `1.10.4`,
+TLS link, link and transport `1.10.6`, and SDK `1.10.12`. Its
+`tls-lifetime-cohort` uses the same immutable link commons and
+validated-struct archives as the receive-budget release. Source checks
+verify both Session cases and the TLS stream ownership case in both profiles.
+
 ## Review, merge and publication
 
 The controlled repository starts `main` at the exact upstream base. Corrections

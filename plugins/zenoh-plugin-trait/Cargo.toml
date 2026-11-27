@@ -22,7 +22,7 @@ license-file = { workspace = true }
 name = "bombay-zenoh-plugin-trait"
 repository = { workspace = true }
 rust-version = "1.88.0"
-version = "1.10.3"
+version = "1.10.4"
 
 [lib]
 name = "zenoh_plugin_trait"

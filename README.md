@@ -68,13 +68,19 @@ shutdown. Incoming handshakes are sequential within each listener; accepted link
 use the existing bounded channel and retain capacity through rejected-link close.
 These counts do not establish a whole-memory, byte or executor-task quota.
 
-The receive-budget candidate is `1.10.11`. Its six archives include Config and
+The published receive-budget release is `1.10.11`. Its six archives include Config and
 plugin trait `1.10.3`, TLS link, link and transport `1.10.5`, and the SDK itself.
 Applications can set `transport/link/rx/unicast_buffer_limit` to an explicit
 byte ceiling for established universal unicast receive backing. The charge
 follows shared buffers through delivery and link close. The release verifies
 source and archives at the Rust `1.88.0` floor before publication and verifies
 the installed graph again with a registry-only consumer.
+
+Candidate `1.10.12` adds an optional session-wide TLS connection limit at
+`transport/link/tls/max_connections`. The slot covers setup and follows the
+original stream until its final owner releases it. Its dependency closure
+uses Config and plugin trait `1.10.4` and TLS link, link and transport
+`1.10.6`.
 
 Maintainers run both pinned profiles:
 

@@ -4,7 +4,7 @@ set -euo pipefail
 PYTHONDONTWRITEBYTECODE=1 python3 ci/release_cohort_tests.py
 
 # This entrypoint must run through the repository's pinned Nix development shell.
-release_kind="${RELEASE_KIND:-receive-budget-successor}"
+release_kind="${RELEASE_KIND:-tls-lifetime-successor}"
 release_packages=(
   bombay-validated-struct-macros bombay-validated-struct
   bombay-zenoh-link-commons bombay-zenoh-config bombay-zenoh-link-tls
@@ -50,7 +50,7 @@ for profile in debug release; do
     api::session::query_identifiers::accepted_queries_keep_their_reply_consumer_at_identifier_exhaustion -- --exact
   cargo test --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib \
     --no-default-features --features transport_tls api::session::query_retirement:: -- --nocapture
-  if [[ "$release_kind" == receive-budget-successor ]]; then
+  if [[ "$release_kind" == receive-budget-successor || "$release_kind" == tls-lifetime-successor ]]; then
     receive_budget_status=0
     receive_budget_output=$(cargo test --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib \
       --no-default-features --features transport_tls,unstable \
@@ -60,6 +60,17 @@ for profile in debug release; do
     [[ "$receive_budget_output" == *'test api::session::unicast_receive_budget::tls_receive_backing_stays_charged_until_the_last_owner_releases_it ... ok'* ]]
     [[ "$receive_budget_output" == *'test api::session::unicast_receive_budget::tls_receive_budget_refuses_unsupported_transport_mode ... ok'* ]]
     [[ "$receive_budget_output" == *'test result: ok. 2 passed; 0 failed; 0 ignored;'* ]]
+  fi
+  if [[ "$release_kind" == tls-lifetime-successor ]]; then
+    tls_connections_status=0
+    tls_connections_output=$(cargo test --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib \
+      --no-default-features --features transport_tls,unstable \
+      api::session::tls_connections:: -- --test-threads=1) || tls_connections_status=$?
+    printf '%s\n' "$tls_connections_output"
+    [[ "$tls_connections_status" == 0 ]]
+    [[ "$tls_connections_output" == *'test api::session::tls_connections::tls_connection_capacity_preserves_the_connected_peer ... ok'* ]]
+    [[ "$tls_connections_output" == *'test api::session::tls_connections::oversized_tls_connection_limit_refuses_startup ... ok'* ]]
+    [[ "$tls_connections_output" == *'test result: ok. 2 passed; 0 failed; 0 ignored;'* ]]
   fi
   cargo test --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib \
     --no-default-features --features transport_tls \
@@ -108,6 +119,10 @@ case "$release_kind" in
     successor_packages=(bombay-zenoh-config bombay-zenoh-link-tls
       bombay-zenoh-plugin-trait bombay-zenoh-link bombay-zenoh-transport bombay-zenoh)
     source_profile=receive-budget-cohort ;;
+  tls-lifetime-successor)
+    successor_packages=(bombay-zenoh-config bombay-zenoh-link-tls
+      bombay-zenoh-plugin-trait bombay-zenoh-link bombay-zenoh-transport bombay-zenoh)
+    source_profile=tls-lifetime-cohort ;;
   *) printf 'Unknown verification cohort\n' >&2; exit 1 ;;
 esac
 successor_arguments=()

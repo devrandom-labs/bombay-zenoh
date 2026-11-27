@@ -43,11 +43,16 @@ Published `1.10.10` delivers TLS stream ownership, sequential incoming
 handshake and bounded accepted-link queue corrections through TLS link, link and
 transport `1.10.4`. It removes the unused listener dependency. The five remaining
 controlled archives keep their exact published bytes and source revisions.
-Candidate `1.10.11` adds an optional byte ceiling for established universal
+Published `1.10.11` adds an optional byte ceiling for established universal
 unicast receive backing. `Session::info()` exposes charged bytes and the
 allocation refusal count when the limit is configured. The release pairs the
 SDK with Config and plugin trait `1.10.3` and TLS link, link and transport
 `1.10.5`. Its compiler floor is Rust `1.88.0`.
+
+Candidate `1.10.12` adds `transport/link/tls/max_connections` for each
+native Session. An opening connection holds its slot throughout setup and
+until its original stream is released. Its exact Config and plugin trait
+versions are `1.10.4`. TLS link, link and transport are `1.10.6`.
 
 Published `1.10.2` corrects resource registration for valid leading UTF-8 path
 chunks. Published `1.10.3` retires finalized/disconnected native interest resources
