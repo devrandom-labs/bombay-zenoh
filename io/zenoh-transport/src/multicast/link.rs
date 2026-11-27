@@ -318,6 +318,8 @@ impl TransportLinkMulticastUniversal {
                 batching_enabled: self.transport.manager.config.batching,
                 batching_time_limit: self.transport.manager.config.queue_backoff,
                 queue_alloc: self.transport.manager.config.queue_alloc,
+                #[cfg(feature = "transport_tls")]
+                tls_link: None,
             };
             // The pipeline
             let (producer, consumer) = TransmissionPipeline::make(tpc, &priority_tx, false);
