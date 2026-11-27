@@ -34,6 +34,10 @@ class ConfigurationCohortEvidence(unittest.TestCase):
         if kind is ReleaseKind.TLS_INGRESS_SUCCESSOR:
             immutable = {"zenoh-config", "zenoh-plugin-trait", "zenoh-link-commons", "validated_struct", "validated_struct_macros"}
             candidates = set(EDGES) - immutable
+        if kind is ReleaseKind.TLS_TRANSMIT_SUCCESSOR:
+            candidates = {"zenoh-transport", "zenoh"}
+            immutable = {"zenoh-config", "zenoh-plugin-trait", "zenoh-link", "zenoh-link-tls",
+                         "zenoh-link-commons", "validated_struct", "validated_struct_macros"}
         self.assertEqual(published_owners(kind), immutable)
         self.assertEqual(TLS_SECURITY_CANDIDATES, {"zenoh-link-commons", "zenoh-link-tls", "zenoh-link", "zenoh-transport", "zenoh"})
         self.assertEqual(CONFIGURATION_CANDIDATES, {
@@ -58,6 +62,10 @@ class ConfigurationCohortEvidence(unittest.TestCase):
                 "bombay-zenoh-config": "1.10.4", "bombay-zenoh-plugin-trait": "1.10.4",
                 "bombay-zenoh-link-tls": "1.10.6", "bombay-zenoh-link": "1.10.6",
                 "bombay-zenoh-transport": "1.10.6", "bombay-zenoh": "1.10.12",
+            })
+        if kind is ReleaseKind.TLS_TRANSMIT_SUCCESSOR:
+            self.assertEqual({name: archive["version"] for name, archive in ledger.items()}, {
+                "bombay-zenoh-transport": "1.10.7", "bombay-zenoh": "1.10.13",
             })
         contents, checksums = {}, {}
         for owner in EDGES:

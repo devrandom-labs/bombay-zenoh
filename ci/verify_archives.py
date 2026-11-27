@@ -64,9 +64,13 @@ class ReleaseKind(enum.Enum):
     TLS_INGRESS_SUCCESSOR = "tls-ingress-successor"
     RECEIVE_BUDGET_SUCCESSOR = "receive-budget-successor"
     TLS_LIFETIME_SUCCESSOR = "tls-lifetime-successor"
+    TLS_TRANSMIT_SUCCESSOR = "tls-transmit-successor"
 
 
-RECEIVE_BUDGET_RELEASES = {ReleaseKind.RECEIVE_BUDGET_SUCCESSOR, ReleaseKind.TLS_LIFETIME_SUCCESSOR}
+RECEIVE_BUDGET_RELEASES = {
+    ReleaseKind.RECEIVE_BUDGET_SUCCESSOR, ReleaseKind.TLS_LIFETIME_SUCCESSOR,
+    ReleaseKind.TLS_TRANSMIT_SUCCESSOR,
+}
 CONFIGURATION_RELEASES = {ReleaseKind.CONFIGURATION_SUCCESSOR} | RECEIVE_BUDGET_RELEASES
 TLS_INGRESS_RELEASES = {ReleaseKind.TLS_INGRESS_SUCCESSOR} | RECEIVE_BUDGET_RELEASES
 TLS_SECURITY_RELEASES = {ReleaseKind.TLS_SECURITY_SUCCESSOR} | TLS_INGRESS_RELEASES
@@ -90,6 +94,15 @@ TLS_SECURITY_PUBLISHED_DEPENDENCIES = {
 TLS_INGRESS_CANDIDATES = TLS_SECURITY_CANDIDATES - {"zenoh-link-commons"}
 TLS_INGRESS_PUBLISHED_DEPENDENCIES = TLS_SECURITY_PUBLISHED_DEPENDENCIES | {
     "zenoh-link-commons": "06a8038115ba3509474f73b15bafa7a932ecacee0863ac22de40be5700b69a2c",
+}
+
+TLS_TRANSMIT_CANDIDATES = {"zenoh-transport", "zenoh"}
+TLS_LIFETIME_PUBLISHED_REVISION = "a0ed5ec9962215d471fe458ca35b958fbfc865d9"
+TLS_LIFETIME_PUBLISHED_DEPENDENCIES = {
+    "zenoh-config": "97c0226fd7ec8cee51e91e9e590969166c49836c66b73e7e621ad1fe2736e284",
+    "zenoh-link": "9993c66190cc2f90971bfa4e67154c7a6168357d0edc70a1850fbb158e5ca99d",
+    "zenoh-link-tls": "05bfee1a450b1a1c0993a249ab77037856c2e5faf1cbacd1c0196d1a3deb4e38",
+    "zenoh-plugin-trait": "55b5b4838e1ec8f8bb2a6715694715d5d9ee3f53338022b5f124da3828c22d10",
 }
 
 
@@ -116,6 +129,8 @@ def identity(owner):
 
 
 def published_dependencies(release_kind):
+    if release_kind is ReleaseKind.TLS_TRANSMIT_SUCCESSOR:
+        return TLS_INGRESS_PUBLISHED_DEPENDENCIES | TLS_LIFETIME_PUBLISHED_DEPENDENCIES
     if release_kind in RECEIVE_BUDGET_RELEASES:
         return {owner: TLS_INGRESS_PUBLISHED_DEPENDENCIES[owner]
                 for owner in published_owners(release_kind)}
@@ -125,6 +140,9 @@ def published_dependencies(release_kind):
 
 
 def published_revision(owner, release_kind):
+    if (release_kind is ReleaseKind.TLS_TRANSMIT_SUCCESSOR
+            and owner in TLS_LIFETIME_PUBLISHED_DEPENDENCIES):
+        return TLS_LIFETIME_PUBLISHED_REVISION
     if release_kind in TLS_INGRESS_RELEASES and owner == "zenoh-link-commons":
         return "1ea4bd160b98f5ef994064378066cd2efd081e26"
     if release_kind in {ReleaseKind.TLS_SECURITY_SUCCESSOR, ReleaseKind.TLS_INGRESS_SUCCESSOR} and owner in {"zenoh-config", "zenoh-plugin-trait"}:
@@ -133,6 +151,8 @@ def published_revision(owner, release_kind):
 
 
 def published_owners(release_kind):
+    if release_kind is ReleaseKind.TLS_TRANSMIT_SUCCESSOR:
+        return set(EDGES) - TLS_TRANSMIT_CANDIDATES
     if release_kind is ReleaseKind.TLS_INGRESS_SUCCESSOR:
         return set(EDGES) - TLS_INGRESS_CANDIDATES
     if release_kind is ReleaseKind.TLS_SECURITY_SUCCESSOR:
@@ -145,6 +165,8 @@ def published_owners(release_kind):
 
 
 def version(owner, release_kind=ReleaseKind.INITIAL_COHORT):
+    if release_kind is ReleaseKind.TLS_TRANSMIT_SUCCESSOR:
+        return {"zenoh-transport": "1.10.7", "zenoh": "1.10.13"}.get(owner) or version(owner, ReleaseKind.TLS_LIFETIME_SUCCESSOR)
     if release_kind is ReleaseKind.TLS_LIFETIME_SUCCESSOR:
         if owner in CONFIGURATION_CANDIDATES:
             return {

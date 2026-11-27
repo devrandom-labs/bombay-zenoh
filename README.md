@@ -76,11 +76,16 @@ follows shared buffers through delivery and link close. The release verifies
 source and archives at the Rust `1.88.0` floor before publication and verifies
 the installed graph again with a registry-only consumer.
 
-Candidate `1.10.12` adds an optional session-wide TLS connection limit at
+Published `1.10.12` adds an optional session-wide TLS connection limit at
 `transport/link/tls/max_connections`. The slot covers setup and follows the
 original stream until its final owner releases it. Its dependency closure
 uses Config and plugin trait `1.10.4` and TLS link, link and transport
 `1.10.6`.
+
+Candidate SDK `1.10.13` uses transport `1.10.7`. The original TLS slot
+follows the transmit queue through close until its final owner releases
+the queue. Config, plugin trait, link and TLS link retain their published
+versions from `1.10.12`.
 
 Maintainers run both pinned profiles:
 

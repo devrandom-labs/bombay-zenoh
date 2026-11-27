@@ -92,6 +92,14 @@ TLS link, link and transport `1.10.6`, and SDK `1.10.12`. Its
 validated-struct archives as the receive-budget release. Source checks
 verify both Session cases and the TLS stream ownership case in both profiles.
 
+## TLS transmit retirement successor
+
+`tls-transmit-successor` verifies transport `1.10.7` and SDK `1.10.13`
+in that order. Other controlled dependencies use their existing published
+checksums. `tls-transmit-cohort` tests the extracted SDK against the audited
+transport candidate. The source gate verifies that a retained producer
+holds the original TLS slot through close and releases it once.
+
 ## Review, merge and publication
 
 The controlled repository starts `main` at the exact upstream base. Corrections
