@@ -31,6 +31,8 @@ use zenoh_buffers::{
 use zenoh_codec::{transport::batch::BatchError, WCodec, Zenoh080};
 use zenoh_config::{QueueAllocConf, QueueAllocMode, QueueSizeConf};
 use zenoh_core::zlock;
+#[cfg(feature = "transport_tls")]
+use zenoh_link::LinkUnicast;
 use zenoh_protocol::{
     core::Priority,
     network::{NetworkMessageExt, NetworkMessageRef},
@@ -681,6 +683,8 @@ pub(crate) struct TransmissionPipelineConf {
     pub(crate) batching_enabled: bool,
     pub(crate) batching_time_limit: Duration,
     pub(crate) queue_alloc: QueueAllocConf,
+    #[cfg(feature = "transport_tls")]
+    pub(crate) tls_link: Option<LinkUnicast>,
 }
 
 // A 2-stage transmission pipeline
@@ -701,6 +705,8 @@ impl TransmissionPipeline {
                 max_wait_before_drop_fragments: config.max_wait_before_drop_fragments,
                 wait_before_close: config.wait_before_close,
             },
+            #[cfg(feature = "transport_tls")]
+            _tls_link: config.tls_link,
         });
 
         let mut stage_in = vec![];
@@ -815,6 +821,10 @@ struct TransmissionPipelineStatus {
     // wait parameters
     // Note: this is placed here to optimize TransmissionPipelineProducer memory layout and improve performance
     waits: Waits,
+    // A retired pipeline can still own queued buffers after its link closes.
+    // Keep the original connection slot until the last queue owner releases it.
+    #[cfg(feature = "transport_tls")]
+    _tls_link: Option<LinkUnicast>,
 }
 
 impl TransmissionPipelineStatus {
@@ -1165,6 +1175,8 @@ mod tests {
         queue_alloc: QueueAllocConf {
             mode: QueueAllocMode::Init,
         },
+        #[cfg(feature = "transport_tls")]
+        tls_link: None,
     };
 
     const CONFIG_NOT_STREAMED: TransmissionPipelineConf = TransmissionPipelineConf {
@@ -1183,6 +1195,8 @@ mod tests {
         queue_alloc: QueueAllocConf {
             mode: QueueAllocMode::Init,
         },
+        #[cfg(feature = "transport_tls")]
+        tls_link: None,
     };
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

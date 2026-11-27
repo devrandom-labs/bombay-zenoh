@@ -55,6 +55,8 @@ use zenoh_buffers::{
 };
 use zenoh_buffers::{ZSlice, ZSliceBuffer};
 use zenoh_link::Link;
+#[cfg(feature = "transport_tls")]
+use zenoh_link::LinkAuthId;
 use zenoh_protocol::{
     core::Priority,
     transport::{KeepAlive, TransportMessage},
@@ -135,6 +137,10 @@ impl TransportLinkUnicastUniversal {
             batching_enabled: transport.manager.config.batching,
             batching_time_limit: transport.manager.config.queue_backoff,
             queue_alloc: transport.manager.config.queue_alloc,
+            #[cfg(feature = "transport_tls")]
+            tls_link: (transport.manager.tls_connections.is_some()
+                && matches!(link.link.get_auth_id(), LinkAuthId::Tls(_)))
+            .then(|| link.link.clone()),
         };
 
         // The pipeline
@@ -668,6 +674,148 @@ mod receive_budget {
         assert_eq!(budget.charged_bytes(), 4_096);
         drop(held);
         assert_eq!(budget.charged_bytes(), 0);
+    }
+}
+
+#[cfg(all(test, feature = "transport_tls"))]
+mod transmit_retirement {
+    use std::{num::NonZeroUsize, path::Path, sync::Arc, time::Duration};
+
+    use tokio::{sync::Mutex, time::timeout};
+    use zenoh_config::Config;
+    use zenoh_link::{tls::LinkManagerUnicastTls, LinkManagerUnicastTrait};
+    use zenoh_protocol::{
+        core::{EndPoint, Field, Priority, WhatAmI},
+        transport::{init::ext::PatchType, KeepAlive},
+    };
+    use zenoh_runtime::ZRuntime;
+
+    use super::{
+        super::transport::ClosableCallback, BatchConfig, TransportLinkUnicast,
+        TransportLinkUnicastUniversal, TransportPriorityTx, TransportUnicastUniversal,
+    };
+    use crate::{
+        unicast::{
+            link::{TransportLinkUnicastConfig, TransportLinkUnicastDirection},
+            transport_unicast_inner::TransportStatus,
+            TransportConfigUnicast,
+        },
+        DummyTransportEventHandler, TransportManager,
+    };
+
+    fn endpoint(address: &str) -> EndPoint {
+        let certificates = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zenoh-links/zenoh-link-tls/tests/fixtures/tls-ownership");
+        let ca = certificates.join("root-ca.pem");
+        let certificate = certificates.join("localhost-certificate.pem");
+        let key = certificates.join("localhost-private-key.pem");
+        let configuration = format!(
+            "root_ca_certificate_file={};listen_certificate_file={};listen_private_key_file={};connect_certificate_file={};connect_private_key_file={};enable_mtls=true;verify_name_on_connect=true;use_public_pki=false",
+            ca.display(), certificate.display(), key.display(), certificate.display(), key.display()
+        );
+        EndPoint::new("tls", address, "", configuration).unwrap()
+    }
+
+    #[test]
+    fn retired_producer_keeps_its_tls_slot_until_the_queue_is_released() {
+        ZRuntime::Application.block_on(async {
+            timeout(Duration::from_secs(10), async {
+                let mut config = Config::default();
+                config
+                    .transport
+                    .link
+                    .tls
+                    .set_max_connections(Some(NonZeroUsize::MIN))
+                    .unwrap();
+                let native = TransportManager::builder()
+                    .from_config(&config.expanded())
+                    .await
+                    .unwrap()
+                    .build(Arc::new(DummyTransportEventHandler))
+                    .unwrap();
+                let slots = native.tls_connections.as_ref().unwrap().clone();
+                let resolution = native.config.resolution.get(Field::FrameSN);
+                let transmit = TransportUnicastUniversal {
+                    manager: Arc::new(native),
+                    config: Arc::new(TransportConfigUnicast {
+                        zid: Default::default(),
+                        whatami: WhatAmI::Peer,
+                        region_name: None,
+                        bound: None,
+                        sn_resolution: resolution,
+                        tx_initial_sn: 0,
+                        is_qos: false,
+                        is_lowlatency: false,
+                        patch: PatchType::CURRENT,
+                    }),
+                    priority_tx: Arc::new([TransportPriorityTx::make(resolution).unwrap()]),
+                    priority_rx: Arc::new([]),
+                    links: Default::default(),
+                    callback: Arc::new(ClosableCallback::new()),
+                    status: Arc::new(Mutex::new(TransportStatus::Uninitialized)),
+                };
+                let (publication, incoming) = flume::bounded(1);
+                let listener = LinkManagerUnicastTls::new(publication.clone());
+                let caller =
+                    LinkManagerUnicastTls::with_connection_limit(publication, slots.clone());
+                let locator = listener
+                    .new_listener(endpoint("localhost:0"))
+                    .await
+                    .unwrap();
+                let address = locator.address();
+                let port = address.as_str().rsplit(':').next().unwrap();
+                let peer = endpoint(&format!("localhost:{port}"));
+
+                let idle = slots.available_permits();
+                let outgoing = caller.new_link(peer.clone()).await.unwrap();
+                let accepted = incoming.recv_async().await.unwrap();
+                let active = slots.available_permits();
+                let link = TransportLinkUnicast::new(
+                    outgoing,
+                    TransportLinkUnicastConfig {
+                        direction: TransportLinkUnicastDirection::Outbound,
+                        batch: BatchConfig {
+                            mtu: transmit.manager.config.batch_size,
+                            is_streamed: true,
+                        },
+                        priorities: None,
+                        reliability: None,
+                    },
+                );
+                let (link, consumer) =
+                    TransportLinkUnicastUniversal::new(&transmit, link, &transmit.priority_tx);
+                let producer = link.pipeline.clone();
+                let queued = producer.push_transport_message(KeepAlive.into(), Priority::DEFAULT);
+
+                let closed = tokio::join!(link.close(), accepted.close());
+                drop((consumer, accepted));
+                let held = slots.available_permits();
+                drop(producer);
+                let released = slots.available_permits();
+
+                let replacement = caller.new_link(peer.clone()).await.unwrap();
+                let accepted = incoming.recv_async().await.unwrap();
+                let replaced = slots.available_permits();
+                let closed_replacement = tokio::join!(replacement.close(), accepted.close());
+                drop((replacement, accepted));
+                let retired = slots.available_permits();
+                let closed_listener = listener.del_listener(&peer).await;
+                transmit.manager.close().await;
+
+                closed.0.unwrap();
+                closed.1.unwrap();
+                closed_replacement.0.unwrap();
+                closed_replacement.1.unwrap();
+                closed_listener.unwrap();
+                assert!(queued);
+                assert_eq!(
+                    [idle, active, held, released, replaced, retired],
+                    [1, 0, 0, 1, 0, 1]
+                );
+            })
+            .await
+            .expect("the TLS connection and retirement complete");
+        });
     }
 }
 
