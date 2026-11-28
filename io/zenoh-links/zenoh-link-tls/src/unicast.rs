@@ -323,7 +323,7 @@ fn reserve_connection(
 #[async_trait]
 impl LinkManagerUnicastTrait for LinkManagerUnicastTls {
     async fn new_link(&self, endpoint: EndPoint) -> ZResult<LinkUnicast> {
-        let connection = reserve_connection(self.connections.as_ref())?;
+        let mut connection = reserve_connection(self.connections.as_ref())?;
         let epaddr = endpoint.address();
         let epconf = endpoint.config();
 
@@ -340,7 +340,7 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTls {
         }
 
         // Initialize the TLS Config
-        let client_config = TlsClientConfig::new(&epconf)
+        let client_config = TlsClientConfig::new(&epconf, &mut connection)
             .await
             .map_err(|e| zerror!(e => "Cannot configure TLS connection to {epaddr}"))?;
         let config = Arc::new(client_config.client_config);
