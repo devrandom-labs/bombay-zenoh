@@ -66,3 +66,4 @@ supported-profile = "tls-only"
 
 [dev-dependencies]
 flume = { workspace = true }
+tempfile = "=3.27.0"

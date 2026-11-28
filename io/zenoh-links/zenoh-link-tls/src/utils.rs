@@ -14,8 +14,10 @@
 use std::{
     convert::TryFrom,
     fs::File,
-    io::{self, BufReader, Cursor},
+    io::{self, BufReader, Cursor, Read},
     net::SocketAddr,
+    num::NonZeroU32,
+    path::PathBuf,
     str::FromStr,
     sync::Arc,
     time::Duration,
@@ -49,6 +51,8 @@ use zenoh_protocol::core::{
 };
 use zenoh_result::{bail, zerror, ZError, ZResult};
 
+const TLS_MAX_CREDENTIAL_FILE_BYTES: &str = "max_credential_file_bytes";
+
 #[derive(Default, Clone, Copy, Debug)]
 pub struct TlsConfigurator;
 
@@ -57,6 +61,12 @@ impl ConfigurationInspector<ZenohConfig> for TlsConfigurator {
         let mut ps: Vec<(&str, &str)> = vec![];
 
         let c = config.transport().link().tls();
+
+        let credential_file_bytes;
+        if let Some(bytes) = c.max_credential_file_bytes() {
+            credential_file_bytes = bytes.to_string();
+            ps.push((TLS_MAX_CREDENTIAL_FILE_BYTES, &credential_file_bytes));
+        }
 
         match (c.root_ca_certificate(), c.root_ca_certificate_base64()) {
             (Some(_), Some(_)) => {
@@ -485,6 +495,39 @@ fn process_pem(pem: &mut dyn io::BufRead) -> ZResult<Vec<TrustAnchor<'static>>> 
     Ok(trust_anchors)
 }
 
+fn credential_file_limit(config: &Config<'_>) -> ZResult<Option<NonZeroU32>> {
+    Ok(config
+        .get(TLS_MAX_CREDENTIAL_FILE_BYTES)
+        .map(str::parse)
+        .transpose()?)
+}
+
+fn read_bounded_credential_file(file: File, limit: NonZeroU32) -> io::Result<Vec<u8>> {
+    let limit = u64::from(limit.get());
+    let mut credential = Vec::new();
+    let bytes = file.take(limit + 1).read_to_end(&mut credential)?;
+    if bytes as u64 > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("TLS credential file exceeds {limit} bytes"),
+        ));
+    }
+    Ok(credential)
+}
+
+async fn read_credential_file(config: &Config<'_>, filename: &str) -> ZResult<Vec<u8>> {
+    match credential_file_limit(config)? {
+        Some(limit) => {
+            let filename = PathBuf::from(filename);
+            Ok(tokio::task::spawn_blocking(move || {
+                read_bounded_credential_file(File::open(filename)?, limit)
+            })
+            .await??)
+        }
+        None => Ok(tokio::fs::read(filename).await?),
+    }
+}
+
 async fn load_tls_key(
     config: &Config<'_>,
     tls_private_key_raw_config_key: &str,
@@ -500,9 +543,9 @@ async fn load_tls_key(
     }
 
     if let Some(value) = config.get(tls_private_key_file_config_key) {
-        return Ok(tokio::fs::read(value)
+        return Ok(read_credential_file(config, value)
             .await
-            .map_err(|e| zerror!("Invalid TLS private key file: {}", e))?)
+            .map_err(|e| zerror!(e => "Invalid TLS private key file"))?)
         .and_then(|result| {
             if result.is_empty() {
                 Err(zerror!("Empty TLS key.").into())
@@ -529,9 +572,9 @@ async fn load_tls_certificate(
     }
 
     if let Some(value) = config.get(tls_certificate_file_config_key) {
-        return Ok(tokio::fs::read(value)
+        return Ok(read_credential_file(config, value)
             .await
-            .map_err(|e| zerror!("Invalid TLS certificate file: {}", e))?);
+            .map_err(|e| zerror!(e => "Invalid TLS certificate file"))?);
     }
     Err(zerror!("Missing tls certificates.").into())
 }
@@ -581,8 +624,14 @@ fn load_trust_anchors(config: &Config<'_>) -> ZResult<Option<RootCertStore>> {
     }
 
     if let Some(filename) = config.get(TLS_ROOT_CA_CERTIFICATE_FILE) {
-        let mut pem = BufReader::new(File::open(filename)?);
-        let trust_anchors = process_pem(&mut pem)?;
+        let limit = credential_file_limit(config)?;
+        let file = File::open(filename)?;
+        let trust_anchors = match limit {
+            Some(limit) => {
+                process_pem(&mut Cursor::new(read_bounded_credential_file(file, limit)?))?
+            }
+            None => process_pem(&mut BufReader::new(file))?,
+        };
         root_cert_store.extend(trust_anchors);
         return Ok(Some(root_cert_store));
     }
@@ -758,7 +807,9 @@ R+IdLiXcyIkg0m9N8I17p0ljCSkbrgGMD3bbePRTfg==
 #[cfg(test)]
 mod tls_pem_tests {
     use std::{
+        fs::{self, File},
         io::{self, BufReader, Cursor, Read},
+        num::NonZeroU32,
         ptr,
     };
 
@@ -769,11 +820,14 @@ mod tls_pem_tests {
         PrivateKeyDer::{Pkcs1, Pkcs8, Sec1},
         TrustAnchor,
     };
+    use zenoh_config::Config as ZenohConfig;
+    use zenoh_link_commons::ConfigurationInspector;
     use zenoh_protocol::core::EndPoint;
 
     use super::{
-        outgoing_tls_trust_tests::DEPLOYMENT_CA, preferred_private_keys, process_pem,
-        TlsClientConfig, TlsServerConfig,
+        load_trust_anchors, outgoing_tls_trust_tests::DEPLOYMENT_CA, preferred_private_keys,
+        process_pem, read_bounded_credential_file, TlsClientConfig, TlsConfigurator,
+        TlsServerConfig,
     };
 
     const RSA: &str = "-----BEGIN RSA PRIVATE KEY-----\nAQID\n-----END RSA PRIVATE KEY-----\n";
@@ -804,6 +858,81 @@ AQUFBwMBBggrBgEFBQcDAjAKBggqhkjOPQQDAwNIADBFAiARmqtIYRygkWrMZg6j
 kYikJVUysUelvUMRfljBCbB1jgIhALzl57XtBhJ+QVy5jNMKjU6s9yfCvnzZPTpk
 3Z0eRdp3
 -----END CERTIFICATE-----";
+
+    #[tokio::test]
+    async fn configured_file_limit_preserves_exact_pem_and_refuses_one_extra_byte() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("credential.pem");
+        let mut config = ZenohConfig::default();
+        let configured_file = format!("{file:?}");
+        for name in [
+            "transport/link/tls/listen_private_key",
+            "transport/link/tls/listen_certificate",
+            "transport/link/tls/root_ca_certificate",
+        ] {
+            config.insert_json5(name, &configured_file).unwrap();
+        }
+        let legacy_options = TlsConfigurator.inspect_config(&config).unwrap();
+        let legacy_endpoint = EndPoint::new("tls", "localhost:7447", "", legacy_options).unwrap();
+        let mut pem = DEPLOYMENT_CA.as_bytes().to_vec();
+        pem.resize(65_537, b'\n');
+        fs::write(&file, &pem).unwrap();
+        let legacy = TlsServerConfig::load_tls_certificate(&legacy_endpoint.config()).await;
+        assert_eq!(legacy.unwrap(), pem);
+
+        let mut invalid = config.clone();
+        let zero_limit = invalid.insert_json5("transport/link/tls/max_credential_file_bytes", "0");
+        assert!(zero_limit.is_err());
+
+        config
+            .insert_json5("transport/link/tls/max_credential_file_bytes", "65536")
+            .expect("the configured TLS policy accepts a positive credential file limit");
+        let options = TlsConfigurator.inspect_config(&config).unwrap();
+        let endpoint = EndPoint::new("tls", "localhost:7447", "", options).unwrap();
+        let selected = endpoint.config();
+
+        pem.truncate(65_536);
+        fs::write(&file, &pem).unwrap();
+        let key = TlsServerConfig::load_tls_private_key(&selected).await;
+        let certificate = TlsServerConfig::load_tls_certificate(&selected).await;
+        let roots = load_trust_anchors(&selected);
+
+        pem.push(b'\n');
+        fs::write(&file, &pem).unwrap();
+        let refused_key = TlsServerConfig::load_tls_private_key(&selected).await;
+        let refused_certificate = TlsServerConfig::load_tls_certificate(&selected).await;
+        let refused_roots = load_trust_anchors(&selected);
+        let boundary_refusal = read_bounded_credential_file(
+            File::open(&file).unwrap(),
+            NonZeroU32::new(65_536).unwrap(),
+        );
+        directory.close().unwrap();
+
+        assert_eq!(key.unwrap().as_slice(), &pem[..65_536]);
+        assert_eq!(certificate.unwrap().as_slice(), &pem[..65_536]);
+        assert_eq!(roots.unwrap().unwrap().roots.len(), 1);
+        assert_eq!(
+            boundary_refusal.unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        for refusal in [&refused_key, &refused_certificate] {
+            let source = refusal.as_ref().unwrap_err().source();
+            assert!(source.is_some_and(|source| source.to_string().contains("exceeds 65536 bytes")));
+        }
+        for (name, refusal) in [
+            ("private key", refused_key.err()),
+            ("certificate", refused_certificate.err()),
+            ("roots", refused_roots.err()),
+        ] {
+            let refusal = refusal.unwrap_or_else(|| panic!("accepted oversized {name}"));
+            assert!(
+                refusal
+                    .to_string()
+                    .contains("TLS credential file exceeds 65536 bytes"),
+                "{name} returned an unrelated refusal"
+            );
+        }
+    }
 
     #[test]
     fn process_pem_preserves_complete_ordered_trust_anchors() {
