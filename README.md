@@ -87,9 +87,9 @@ follows the transmit queue through close until its final owner releases
 the queue. Config, plugin trait, link and TLS link retain their published
 versions from `1.10.12`.
 
-Candidate SDK `1.10.14` closes a TLS listener through its registered bound
-socket when a different hostname resolves to that socket. It uses link commons
-`1.10.3`, TLS link and link `1.10.7`, and transport `1.10.8`.
+Candidate SDK `1.10.14` closes a uniquely registered TLS endpoint using its
+bound socket, without another hostname lookup. It uses link commons `1.10.3`,
+TLS link and link `1.10.7`, and transport `1.10.8`.
 
 Maintainers run both pinned profiles:
 
