@@ -43,6 +43,7 @@ class QuerySourceProfile(enum.Enum):
     RECEIVE_BUDGET_COHORT = "receive-budget-cohort"
     TLS_LIFETIME_COHORT = "tls-lifetime-cohort"
     TLS_TRANSMIT_COHORT = "tls-transmit-cohort"
+    TLS_LISTENER_COHORT = "tls-listener-cohort"
 
 
 def query_release_kind(source_profile, selected_kind):
@@ -50,13 +51,15 @@ def query_release_kind(source_profile, selected_kind):
         QuerySourceProfile.REGISTRY: (ReleaseKind.INITIAL_COHORT, ReleaseKind.ZENOH_SUCCESSOR,
                                      ReleaseKind.CONFIGURATION_SUCCESSOR, ReleaseKind.TLS_SECURITY_SUCCESSOR,
                                      ReleaseKind.TLS_INGRESS_SUCCESSOR, ReleaseKind.RECEIVE_BUDGET_SUCCESSOR,
-                                     ReleaseKind.TLS_LIFETIME_SUCCESSOR, ReleaseKind.TLS_TRANSMIT_SUCCESSOR),
+                                     ReleaseKind.TLS_LIFETIME_SUCCESSOR, ReleaseKind.TLS_TRANSMIT_SUCCESSOR,
+                                     ReleaseKind.TLS_LISTENER_SUCCESSOR),
         QuerySourceProfile.CONFIGURATION_COHORT: (ReleaseKind.CONFIGURATION_SUCCESSOR,),
         QuerySourceProfile.TLS_SECURITY_COHORT: (ReleaseKind.TLS_SECURITY_SUCCESSOR,),
         QuerySourceProfile.TLS_INGRESS_COHORT: (ReleaseKind.TLS_INGRESS_SUCCESSOR,),
         QuerySourceProfile.RECEIVE_BUDGET_COHORT: (ReleaseKind.RECEIVE_BUDGET_SUCCESSOR,),
         QuerySourceProfile.TLS_LIFETIME_COHORT: (ReleaseKind.TLS_LIFETIME_SUCCESSOR,),
         QuerySourceProfile.TLS_TRANSMIT_COHORT: (ReleaseKind.TLS_TRANSMIT_SUCCESSOR,),
+        QuerySourceProfile.TLS_LISTENER_COHORT: (ReleaseKind.TLS_LISTENER_SUCCESSOR,),
     }
     kind = allowed[source_profile][-1] if selected_kind is None else selected_kind
     assert kind in allowed[source_profile], "query source profile and release kind conflict"

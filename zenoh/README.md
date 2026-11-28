@@ -54,9 +54,13 @@ native Session. An opening connection holds its slot throughout setup and
 until its original stream is released. Its exact Config and plugin trait
 versions are `1.10.4`. TLS link, link and transport are `1.10.6`.
 
-Candidate `1.10.13` changes only the controlled transport dependency, to
+SDK `1.10.13` changes only the controlled transport dependency, to
 `1.10.7`. An outstanding transmit queue retains its original TLS slot
 through close. The settings and public SDK API are unchanged.
+
+Candidate `1.10.14` selects link commons `1.10.3`, TLS link and link
+`1.10.7`, and transport `1.10.8`. TLS listener retirement uses the registered
+bound socket and awaits the original accept loop. The SDK API is unchanged.
 
 Published `1.10.2` corrects resource registration for valid leading UTF-8 path
 chunks. Published `1.10.3` retires finalized/disconnected native interest resources

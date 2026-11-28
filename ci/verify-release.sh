@@ -4,7 +4,7 @@ set -euo pipefail
 PYTHONDONTWRITEBYTECODE=1 python3 ci/release_cohort_tests.py
 
 # This entrypoint must run through the repository's pinned Nix development shell.
-release_kind="${RELEASE_KIND:-tls-transmit-successor}"
+release_kind="${RELEASE_KIND:-tls-listener-successor}"
 release_packages=(
   bombay-validated-struct-macros bombay-validated-struct
   bombay-zenoh-link-commons bombay-zenoh-config bombay-zenoh-link-tls
@@ -51,7 +51,7 @@ for profile in debug release; do
   cargo test --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib \
     --no-default-features --features transport_tls api::session::query_retirement:: -- --nocapture
   if [[ "$release_kind" == receive-budget-successor || "$release_kind" == tls-lifetime-successor ||
-        "$release_kind" == tls-transmit-successor ]]; then
+        "$release_kind" == tls-transmit-successor || "$release_kind" == tls-listener-successor ]]; then
     receive_budget_status=0
     receive_budget_output=$(cargo test --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib \
       --no-default-features --features transport_tls,unstable \
@@ -62,7 +62,8 @@ for profile in debug release; do
     [[ "$receive_budget_output" == *'test api::session::unicast_receive_budget::tls_receive_budget_refuses_unsupported_transport_mode ... ok'* ]]
     [[ "$receive_budget_output" == *'test result: ok. 2 passed; 0 failed; 0 ignored;'* ]]
   fi
-  if [[ "$release_kind" == tls-lifetime-successor || "$release_kind" == tls-transmit-successor ]]; then
+  if [[ "$release_kind" == tls-lifetime-successor || "$release_kind" == tls-transmit-successor ||
+        "$release_kind" == tls-listener-successor ]]; then
     tls_connections_status=0
     tls_connections_output=$(cargo test --locked --jobs 2 "${build_arguments[@]}" -p bombay-zenoh --lib \
       --no-default-features --features transport_tls,unstable \
@@ -127,6 +128,10 @@ case "$release_kind" in
   tls-transmit-successor)
     successor_packages=(bombay-zenoh-transport bombay-zenoh)
     source_profile=tls-transmit-cohort ;;
+  tls-listener-successor)
+    successor_packages=(bombay-zenoh-link-commons bombay-zenoh-link-tls
+      bombay-zenoh-link bombay-zenoh-transport bombay-zenoh)
+    source_profile=tls-listener-cohort ;;
   *) printf 'Unknown verification cohort\n' >&2; exit 1 ;;
 esac
 successor_arguments=()

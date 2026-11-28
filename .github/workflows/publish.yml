@@ -18,8 +18,8 @@ on:
         description: Exact reviewed successor closure (resume retains its original cohort)
         required: true
         type: choice
-        default: tls-transmit-successor
-        options: [tls-transmit-successor, tls-lifetime-successor, receive-budget-successor, tls-ingress-successor, tls-security-successor, configuration-successor, zenoh-successor]
+        default: tls-listener-successor
+        options: [tls-listener-successor, tls-transmit-successor, tls-lifetime-successor, receive-budget-successor, tls-ingress-successor, tls-security-successor, configuration-successor, zenoh-successor]
 
 permissions:
   contents: read

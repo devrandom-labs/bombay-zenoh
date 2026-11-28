@@ -165,7 +165,7 @@ impl LinkUnicastTrait for LinkUnicastTls {
             // cancel the expiration task and close link
             expiration_manager.cancel_expiration_task();
             let res = self.close().await;
-            let _ = expiration_manager.wait_for_expiration_task().await;
+            drop(expiration_manager.wait_for_expiration_task().await);
             return res;
         }
         self.close().await
@@ -466,6 +466,9 @@ impl LinkManagerUnicastTrait for LinkManagerUnicastTls {
     }
 
     async fn del_listener(&self, endpoint: &EndPoint) -> ZResult<()> {
+        if let Some(closed) = self.listeners.del_registered_listener(endpoint).await {
+            return closed;
+        }
         let epaddr = endpoint.address();
         let addr = get_tls_addr(&epaddr).await?;
         self.listeners.del_listener(addr).await

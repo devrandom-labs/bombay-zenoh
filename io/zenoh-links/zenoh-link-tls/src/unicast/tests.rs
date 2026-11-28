@@ -9,14 +9,17 @@ use std::{
     io::{Cursor, Error, ErrorKind},
     path::Path,
     pin::{pin, Pin},
+    slice,
     sync::{Arc, Mutex},
     task::Poll,
     time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    sync::Semaphore,
+    net::{lookup_host, TcpListener, TcpStream},
+    runtime::Builder,
+    sync::{oneshot, Semaphore},
+    task::spawn_blocking,
     time::timeout,
 };
 use tokio_rustls::{
@@ -30,7 +33,9 @@ use tracing::{
     span::{Attributes, Id, Record},
     Event, Level, Metadata, Subscriber,
 };
-use zenoh_link_commons::{LinkAuthId, LinkManagerUnicastTrait, LinkUnicastTrait};
+use zenoh_link_commons::{
+    LinkAuthId, LinkManagerUnicastTrait, LinkUnicastTrait, ListenersUnicastIP,
+};
 use zenoh_protocol::core::EndPoint;
 use zenoh_result::ZResult;
 use zenoh_runtime::ZRuntime;
@@ -92,6 +97,161 @@ async fn connected_tls_links() -> ZResult<(LinkUnicastTls, LinkUnicastTls)> {
             None,
         ),
     ))
+}
+
+#[test]
+fn registered_tls_listener_closes_with_the_blocking_slot_held() {
+    let host = Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    host.block_on(async {
+        let (publication, _incoming) = flume::bounded(1);
+        let listener = LinkManagerUnicastTls::new(publication);
+        let first = timeout(
+            TLS_IO_WAIT,
+            listener.new_listener(tls_endpoint("localhost:0").unwrap()),
+        )
+        .await
+        .expect("the first listener starts before the control")
+        .unwrap();
+        let sibling = timeout(
+            TLS_IO_WAIT,
+            listener.new_listener(tls_endpoint("localhost:0").unwrap()),
+        )
+        .await
+        .expect("the sibling listener starts before the control")
+        .unwrap();
+        let registered = listener.get_listeners().await;
+        let first_endpoint = registered
+            .iter()
+            .find(|endpoint| endpoint.address() == first.address())
+            .expect("the first reported listener is registered");
+        let sibling_endpoint = registered
+            .iter()
+            .find(|endpoint| endpoint.address() == sibling.address())
+            .expect("the sibling reported listener is registered");
+        let first_socket = timeout(TLS_IO_WAIT, lookup_host(first.address().as_str()))
+            .await
+            .expect("the first socket resolves before the control")
+            .unwrap()
+            .next()
+            .unwrap();
+        let sibling_socket = timeout(TLS_IO_WAIT, lookup_host(sibling.address().as_str()))
+            .await
+            .expect("the sibling socket resolves before the control")
+            .unwrap()
+            .next()
+            .unwrap();
+        assert_ne!(first_socket, sibling_socket);
+        let first_bound = TcpListener::bind(first_socket).await;
+        assert!(matches!(first_bound, Err(cause) if cause.kind() == ErrorKind::AddrInUse));
+
+        let (release, released) = oneshot::channel();
+        let (entered, occupied) = oneshot::channel();
+        let occupant = spawn_blocking(move || {
+            entered.send(()).expect("the test awaits slot occupation");
+            released.blocking_recv()
+        });
+        timeout(TLS_IO_WAIT, occupied)
+            .await
+            .expect("the blocking control starts before listener retirement")
+            .expect("the host blocking slot is occupied");
+        let first_close = timeout(TLS_IO_WAIT, listener.del_listener(first_endpoint)).await;
+        let remaining = listener.get_listeners().await;
+        let released_socket = TcpListener::bind(first_socket).await;
+        let occupied_socket = TcpListener::bind(sibling_socket).await;
+        release
+            .send(())
+            .expect("the blocking slot stays held through both bind observations");
+        occupant
+            .await
+            .expect("the blocking control joins")
+            .expect("release reaches the control");
+        for endpoint in &remaining {
+            let alias = if endpoint == sibling_endpoint {
+                tls_endpoint(&sibling_socket.to_string()).unwrap()
+            } else {
+                endpoint.clone()
+            };
+            let cleanup = timeout(TLS_IO_WAIT, listener.del_listener(&alias)).await;
+            cleanup
+                .expect("cleanup completes after releasing the blocking slot")
+                .unwrap();
+        }
+
+        first_close
+            .expect("the registered TLS listener closes without waiting for hostname lookup")
+            .expect("the original accept loop is joined");
+        assert_eq!(remaining.as_slice(), slice::from_ref(sibling_endpoint));
+        assert!(released_socket.is_ok(), "the original socket is released");
+        assert!(matches!(occupied_socket, Err(cause) if cause.kind() == ErrorKind::AddrInUse));
+    });
+}
+
+#[test]
+fn ambiguous_listener_lookup_defers_and_unique_lookup_returns_the_close_error() {
+    ZRuntime::Application.block_on(async {
+        timeout(TLS_IO_WAIT, async {
+            let listeners = ListenersUnicastIP::new();
+            let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let sibling = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let first_address = first.local_addr().unwrap();
+            let sibling_address = sibling.local_addr().unwrap();
+            let endpoint = tls_endpoint(&format!("localhost:{}", first_address.port())).unwrap();
+            let alias = tls_endpoint(&first_address.to_string()).unwrap();
+            let first_token = listeners.token.child_token();
+            let first_close = first_token.clone();
+            let sibling_token = listeners.token.child_token();
+            let sibling_close = sibling_token.clone();
+
+            listeners
+                .add_listener(
+                    endpoint.clone(),
+                    first_address,
+                    async move {
+                        first_close.cancelled().await;
+                        drop(first);
+                        Err(Error::new(ErrorKind::Interrupted, "original listener close").into())
+                    },
+                    first_token,
+                )
+                .await
+                .unwrap();
+            listeners
+                .add_listener(
+                    endpoint.clone(),
+                    sibling_address,
+                    async move {
+                        sibling_close.cancelled().await;
+                        drop(sibling);
+                        Ok(())
+                    },
+                    sibling_token,
+                )
+                .await
+                .unwrap();
+
+            let unmatched = listeners.del_registered_listener(&alias).await;
+            let ambiguous = listeners.del_registered_listener(&endpoint).await;
+            let registered = listeners.get_endpoints();
+            let sibling_result = listeners.del_listener(sibling_address).await;
+            let first_result = listeners.del_registered_listener(&endpoint).await;
+
+            assert!(unmatched.is_none() && ambiguous.is_none());
+            assert_eq!(registered, [endpoint.clone(), endpoint]);
+            sibling_result.unwrap();
+            let original = first_result.unwrap().unwrap_err();
+            let original = original.downcast_ref::<Error>().unwrap();
+            assert_eq!(original.kind(), ErrorKind::Interrupted);
+            assert_eq!(original.to_string(), "original listener close");
+            assert!(listeners.get_endpoints().is_empty());
+        })
+        .await
+        .expect("listener lookup and joins finish within the fixture guard");
+    });
 }
 
 #[test]

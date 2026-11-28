@@ -82,10 +82,14 @@ original stream until its final owner releases it. Its dependency closure
 uses Config and plugin trait `1.10.4` and TLS link, link and transport
 `1.10.6`.
 
-Candidate SDK `1.10.13` uses transport `1.10.7`. The original TLS slot
+SDK `1.10.13` uses transport `1.10.7`. The original TLS slot
 follows the transmit queue through close until its final owner releases
 the queue. Config, plugin trait, link and TLS link retain their published
 versions from `1.10.12`.
+
+Candidate SDK `1.10.14` closes a uniquely registered TLS endpoint using its
+bound socket, without another hostname lookup. It uses link commons `1.10.3`,
+TLS link and link `1.10.7`, and transport `1.10.8`.
 
 Maintainers run both pinned profiles:
 
