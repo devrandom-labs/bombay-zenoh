@@ -56,8 +56,9 @@ impl ListenerUnicastIP {
         }
     }
 
-    async fn stop(&self) {
+    async fn close(self) -> ZResult<()> {
         self.token.cancel();
+        self.handle.await?
     }
 }
 
@@ -126,9 +127,24 @@ impl ListenersUnicastIP {
             )
         })?;
 
-        // Send the stop signal
-        listener.stop().await;
-        listener.handle.await?
+        listener.close().await
+    }
+
+    /// Close the unique registered endpoint using its bound socket.
+    /// Returns `None` when the endpoint has no unique registration.
+    pub async fn del_registered_listener(&self, endpoint: &EndPoint) -> Option<ZResult<()>> {
+        let listener = {
+            let mut listeners = zwrite!(self.listeners);
+            let mut matches = listeners
+                .iter()
+                .filter_map(|(addr, listener)| (&listener.endpoint == endpoint).then_some(*addr));
+            let addr = matches.next()?;
+            if matches.next().is_some() {
+                return None;
+            }
+            listeners.remove(&addr)?
+        };
+        Some(listener.close().await)
     }
 
     pub fn get_endpoints(&self) -> Vec<EndPoint> {
