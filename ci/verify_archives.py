@@ -65,11 +65,12 @@ class ReleaseKind(enum.Enum):
     RECEIVE_BUDGET_SUCCESSOR = "receive-budget-successor"
     TLS_LIFETIME_SUCCESSOR = "tls-lifetime-successor"
     TLS_TRANSMIT_SUCCESSOR = "tls-transmit-successor"
+    TLS_LISTENER_SUCCESSOR = "tls-listener-successor"
 
 
 RECEIVE_BUDGET_RELEASES = {
     ReleaseKind.RECEIVE_BUDGET_SUCCESSOR, ReleaseKind.TLS_LIFETIME_SUCCESSOR,
-    ReleaseKind.TLS_TRANSMIT_SUCCESSOR,
+    ReleaseKind.TLS_TRANSMIT_SUCCESSOR, ReleaseKind.TLS_LISTENER_SUCCESSOR,
 }
 CONFIGURATION_RELEASES = {ReleaseKind.CONFIGURATION_SUCCESSOR} | RECEIVE_BUDGET_RELEASES
 TLS_INGRESS_RELEASES = {ReleaseKind.TLS_INGRESS_SUCCESSOR} | RECEIVE_BUDGET_RELEASES
@@ -129,6 +130,9 @@ def identity(owner):
 
 
 def published_dependencies(release_kind):
+    if release_kind is ReleaseKind.TLS_LISTENER_SUCCESSOR:
+        return {owner: published_dependencies(ReleaseKind.TLS_TRANSMIT_SUCCESSOR)[owner]
+                for owner in published_owners(release_kind)}
     if release_kind is ReleaseKind.TLS_TRANSMIT_SUCCESSOR:
         return TLS_INGRESS_PUBLISHED_DEPENDENCIES | TLS_LIFETIME_PUBLISHED_DEPENDENCIES
     if release_kind in RECEIVE_BUDGET_RELEASES:
@@ -140,7 +144,7 @@ def published_dependencies(release_kind):
 
 
 def published_revision(owner, release_kind):
-    if (release_kind is ReleaseKind.TLS_TRANSMIT_SUCCESSOR
+    if (release_kind in {ReleaseKind.TLS_TRANSMIT_SUCCESSOR, ReleaseKind.TLS_LISTENER_SUCCESSOR}
             and owner in TLS_LIFETIME_PUBLISHED_DEPENDENCIES):
         return TLS_LIFETIME_PUBLISHED_REVISION
     if release_kind in TLS_INGRESS_RELEASES and owner == "zenoh-link-commons":
@@ -151,6 +155,8 @@ def published_revision(owner, release_kind):
 
 
 def published_owners(release_kind):
+    if release_kind is ReleaseKind.TLS_LISTENER_SUCCESSOR:
+        return set(EDGES) - TLS_SECURITY_CANDIDATES
     if release_kind is ReleaseKind.TLS_TRANSMIT_SUCCESSOR:
         return set(EDGES) - TLS_TRANSMIT_CANDIDATES
     if release_kind is ReleaseKind.TLS_INGRESS_SUCCESSOR:
@@ -165,6 +171,11 @@ def published_owners(release_kind):
 
 
 def version(owner, release_kind=ReleaseKind.INITIAL_COHORT):
+    if release_kind is ReleaseKind.TLS_LISTENER_SUCCESSOR:
+        return {
+            "zenoh-link-commons": "1.10.3", "zenoh-link-tls": "1.10.7", "zenoh-link": "1.10.7",
+            "zenoh-transport": "1.10.8", "zenoh": "1.10.14",
+        }.get(owner) or version(owner, ReleaseKind.TLS_TRANSMIT_SUCCESSOR)
     if release_kind is ReleaseKind.TLS_TRANSMIT_SUCCESSOR:
         return {"zenoh-transport": "1.10.7", "zenoh": "1.10.13"}.get(owner) or version(owner, ReleaseKind.TLS_LIFETIME_SUCCESSOR)
     if release_kind is ReleaseKind.TLS_LIFETIME_SUCCESSOR:

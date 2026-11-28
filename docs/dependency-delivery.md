@@ -100,6 +100,15 @@ checksums. `tls-transmit-cohort` tests the extracted SDK against the audited
 transport candidate. The source gate verifies that a retained producer
 holds the original TLS slot through close and releases it once.
 
+## TLS listener retirement successor
+
+`tls-listener-successor` verifies link commons `1.10.3`, TLS link and link
+`1.10.7`, transport `1.10.8`, and SDK `1.10.14` in dependency order. Config and
+plugin trait remain at `1.10.4`. `tls-listener-cohort` tests the extracted SDK
+with the four exact audited dependency archives. The source gate checks
+retirement of the registered accept loop through the bound socket in both
+profiles, retaining the original accept-loop result.
+
 ## Review, merge and publication
 
 The controlled repository starts `main` at the exact upstream base. Corrections

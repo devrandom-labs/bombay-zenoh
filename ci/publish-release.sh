@@ -31,7 +31,7 @@ case "${RELEASE_KIND:?}" in
   configuration-successor)
     release_packages=(bombay-zenoh-config bombay-zenoh-link-tls
       bombay-zenoh-plugin-trait bombay-zenoh-link bombay-zenoh-transport bombay-zenoh) ;;
-  tls-security-successor)
+  tls-security-successor|tls-listener-successor)
     release_packages=(bombay-zenoh-link-commons bombay-zenoh-link-tls
       bombay-zenoh-link bombay-zenoh-transport bombay-zenoh) ;;
   tls-ingress-successor)

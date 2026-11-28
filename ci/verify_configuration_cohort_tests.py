@@ -29,8 +29,11 @@ class ConfigurationCohortEvidence(unittest.TestCase):
 
     def test_actual_successor_closure_and_custody_denials(self):
         kind = ReleaseKind(os.environ.get("BOMBAY_RELEASE_KIND", "configuration-successor"))
-        candidates = TLS_SECURITY_CANDIDATES if kind is ReleaseKind.TLS_SECURITY_SUCCESSOR else CONFIGURATION_CANDIDATES
-        immutable = {"zenoh-config", "zenoh-plugin-trait", "validated_struct", "validated_struct_macros"} if kind is ReleaseKind.TLS_SECURITY_SUCCESSOR else {"zenoh-link-commons", "validated_struct", "validated_struct_macros"}
+        candidates = CONFIGURATION_CANDIDATES
+        immutable = {"zenoh-link-commons", "validated_struct", "validated_struct_macros"}
+        if kind in {ReleaseKind.TLS_SECURITY_SUCCESSOR, ReleaseKind.TLS_LISTENER_SUCCESSOR}:
+            candidates = TLS_SECURITY_CANDIDATES
+            immutable = {"zenoh-config", "zenoh-plugin-trait", "validated_struct", "validated_struct_macros"}
         if kind is ReleaseKind.TLS_INGRESS_SUCCESSOR:
             immutable = {"zenoh-config", "zenoh-plugin-trait", "zenoh-link-commons", "validated_struct", "validated_struct_macros"}
             candidates = set(EDGES) - immutable
@@ -66,6 +69,12 @@ class ConfigurationCohortEvidence(unittest.TestCase):
         if kind is ReleaseKind.TLS_TRANSMIT_SUCCESSOR:
             self.assertEqual({name: archive["version"] for name, archive in ledger.items()}, {
                 "bombay-zenoh-transport": "1.10.7", "bombay-zenoh": "1.10.13",
+            })
+        if kind is ReleaseKind.TLS_LISTENER_SUCCESSOR:
+            self.assertEqual({name: archive["version"] for name, archive in ledger.items()}, {
+                "bombay-zenoh-link-commons": "1.10.3", "bombay-zenoh-link-tls": "1.10.7",
+                "bombay-zenoh-link": "1.10.7", "bombay-zenoh-transport": "1.10.8",
+                "bombay-zenoh": "1.10.14",
             })
         contents, checksums = {}, {}
         for owner in EDGES:
