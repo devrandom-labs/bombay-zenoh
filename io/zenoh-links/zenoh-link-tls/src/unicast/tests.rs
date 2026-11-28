@@ -58,7 +58,7 @@ fn tls_endpoint(address: &str) -> ZResult<EndPoint> {
 async fn connected_tls_links() -> ZResult<(LinkUnicastTls, LinkUnicastTls)> {
     let endpoint = tls_endpoint("localhost:0")?;
     let supplied = endpoint.config();
-    let client = TlsClientConfig::new(&supplied).await?;
+    let client = TlsClientConfig::new(&supplied, &mut None).await?;
     let server = TlsServerConfig::new(&supplied).await?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
@@ -510,7 +510,7 @@ fn observe_first_handshake(observation: HandshakeObservation) {
             );
             let endpoint = EndPoint::new("tls", "localhost:0", "", configuration).unwrap();
             let supplied = endpoint.config();
-            let client = TlsClientConfig::new(&supplied).await.unwrap();
+            let client = TlsClientConfig::new(&supplied, &mut None).await.unwrap();
             let server = TlsServerConfig::new(&supplied).await.unwrap();
             let client = Arc::new(client.client_config);
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -799,7 +799,7 @@ fn listener_stop_retires_full_handoff_and_preserves_queued_original() {
             );
             let endpoint = EndPoint::new("tls", "localhost:0", "", configuration).unwrap();
             let supplied = endpoint.config();
-            let client = TlsClientConfig::new(&supplied).await.unwrap();
+            let client = TlsClientConfig::new(&supplied, &mut None).await.unwrap();
             let server = TlsServerConfig::new(&supplied).await.unwrap();
             let connector = TlsConnector::from(Arc::new(client.client_config));
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

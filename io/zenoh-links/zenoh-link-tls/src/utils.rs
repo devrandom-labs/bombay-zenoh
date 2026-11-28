@@ -14,8 +14,10 @@
 use std::{
     convert::TryFrom,
     fs::File,
-    io::{self, BufReader, Cursor},
+    io::{self, BufReader, Cursor, Read},
     net::SocketAddr,
+    num::NonZeroU32,
+    path::PathBuf,
     str::FromStr,
     sync::Arc,
     time::Duration,
@@ -32,6 +34,7 @@ use rustls_pki_types::{
     PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer, ServerName,
 };
 use secrecy::ExposeSecret;
+use tokio::sync::OwnedSemaphorePermit;
 use webpki::anchor_from_trusted_cert;
 use zenoh_config::Config as ZenohConfig;
 use zenoh_link_commons::{
@@ -49,6 +52,8 @@ use zenoh_protocol::core::{
 };
 use zenoh_result::{bail, zerror, ZError, ZResult};
 
+const TLS_MAX_CREDENTIAL_FILE_BYTES: &str = "max_credential_file_bytes";
+
 #[derive(Default, Clone, Copy, Debug)]
 pub struct TlsConfigurator;
 
@@ -57,6 +62,12 @@ impl ConfigurationInspector<ZenohConfig> for TlsConfigurator {
         let mut ps: Vec<(&str, &str)> = vec![];
 
         let c = config.transport().link().tls();
+
+        let credential_file_bytes;
+        if let Some(bytes) = c.max_credential_file_bytes() {
+            credential_file_bytes = bytes.to_string();
+            ps.push((TLS_MAX_CREDENTIAL_FILE_BYTES, &credential_file_bytes));
+        }
 
         match (c.root_ca_certificate(), c.root_ca_certificate_base64()) {
             (Some(_), Some(_)) => {
@@ -290,6 +301,7 @@ impl<'a> TlsServerConfig<'a> {
             TLS_LISTEN_PRIVATE_KEY_RAW,
             TLS_LISTEN_PRIVATE_KEY_FILE,
             TLS_LISTEN_PRIVATE_KEY_BASE64,
+            &mut None,
         )
         .await
     }
@@ -300,6 +312,7 @@ impl<'a> TlsServerConfig<'a> {
             TLS_LISTEN_CERTIFICATE_RAW,
             TLS_LISTEN_CERTIFICATE_FILE,
             TLS_LISTEN_CERTIFICATE_BASE64,
+            &mut None,
         )
         .await
     }
@@ -312,7 +325,10 @@ pub(crate) struct TlsClientConfig<'a> {
 }
 
 impl<'a> TlsClientConfig<'a> {
-    pub async fn new(config: &'a Config<'_>) -> ZResult<Self> {
+    pub async fn new(
+        config: &'a Config<'_>,
+        connection: &mut Option<OwnedSemaphorePermit>,
+    ) -> ZResult<Self> {
         let tls_client_server_auth: bool = match config.get(TLS_ENABLE_MTLS) {
             Some(s) => s
                 .parse()
@@ -351,8 +367,10 @@ impl<'a> TlsClientConfig<'a> {
 
         let cc = if tls_client_server_auth {
             tracing::debug!("Loading client authentication key and certificate...");
-            let tls_client_private_key = TlsClientConfig::load_tls_private_key(config).await?;
-            let tls_client_certificate = TlsClientConfig::load_tls_certificate(config).await?;
+            let tls_client_private_key =
+                TlsClientConfig::load_tls_private_key(config, connection).await?;
+            let tls_client_certificate =
+                TlsClientConfig::load_tls_certificate(config, connection).await?;
 
             let certs: Vec<CertificateDer> = ReadIter::<_, CertificateDer<'static>>::new(
                 &mut Cursor::new(&tls_client_certificate),
@@ -430,22 +448,30 @@ impl<'a> TlsClientConfig<'a> {
         })
     }
 
-    async fn load_tls_private_key(config: &Config<'_>) -> ZResult<Vec<u8>> {
+    async fn load_tls_private_key(
+        config: &Config<'_>,
+        connection: &mut Option<OwnedSemaphorePermit>,
+    ) -> ZResult<Vec<u8>> {
         load_tls_key(
             config,
             TLS_CONNECT_PRIVATE_KEY_RAW,
             TLS_CONNECT_PRIVATE_KEY_FILE,
             TLS_CONNECT_PRIVATE_KEY_BASE64,
+            connection,
         )
         .await
     }
 
-    async fn load_tls_certificate(config: &Config<'_>) -> ZResult<Vec<u8>> {
+    async fn load_tls_certificate(
+        config: &Config<'_>,
+        connection: &mut Option<OwnedSemaphorePermit>,
+    ) -> ZResult<Vec<u8>> {
         load_tls_certificate(
             config,
             TLS_CONNECT_CERTIFICATE_RAW,
             TLS_CONNECT_CERTIFICATE_FILE,
             TLS_CONNECT_CERTIFICATE_BASE64,
+            connection,
         )
         .await
     }
@@ -485,11 +511,62 @@ fn process_pem(pem: &mut dyn io::BufRead) -> ZResult<Vec<TrustAnchor<'static>>> 
     Ok(trust_anchors)
 }
 
+fn credential_file_limit(config: &Config<'_>) -> ZResult<Option<NonZeroU32>> {
+    Ok(config
+        .get(TLS_MAX_CREDENTIAL_FILE_BYTES)
+        .map(str::parse)
+        .transpose()?)
+}
+
+fn read_bounded_credential_file(file: File, limit: NonZeroU32) -> io::Result<Vec<u8>> {
+    let limit = u64::from(limit.get());
+    let mut credential = Vec::new();
+    let bytes = file.take(limit + 1).read_to_end(&mut credential)?;
+    if bytes as u64 > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("TLS credential file exceeds {limit} bytes"),
+        ));
+    }
+    Ok(credential)
+}
+
+async fn join_credential_read(
+    connection: &mut Option<OwnedSemaphorePermit>,
+    read: impl FnOnce() -> io::Result<Vec<u8>> + Send + 'static,
+) -> io::Result<Vec<u8>> {
+    let permit = connection.take();
+    // Keep the permit beside the result in case the waiting connector is cancelled.
+    let (result, permit) = tokio::task::spawn_blocking(move || (read(), permit))
+        .await
+        .map_err(io::Error::other)?;
+    *connection = permit;
+    result
+}
+
+async fn read_credential_file(
+    config: &Config<'_>,
+    filename: &str,
+    connection: &mut Option<OwnedSemaphorePermit>,
+) -> ZResult<Vec<u8>> {
+    match credential_file_limit(config)? {
+        Some(limit) => {
+            let filename = PathBuf::from(filename);
+            Ok(join_credential_read(connection, move || {
+                read_bounded_credential_file(File::open(filename)?, limit)
+            })
+            .await?)
+        }
+        None => Ok(tokio::fs::read(filename).await?),
+    }
+}
+
 async fn load_tls_key(
     config: &Config<'_>,
     tls_private_key_raw_config_key: &str,
     tls_private_key_file_config_key: &str,
     tls_private_key_base64_config_key: &str,
+    connection: &mut Option<OwnedSemaphorePermit>,
 ) -> ZResult<Vec<u8>> {
     if let Some(value) = config.get(tls_private_key_raw_config_key) {
         return Ok(value.as_bytes().to_vec());
@@ -500,9 +577,9 @@ async fn load_tls_key(
     }
 
     if let Some(value) = config.get(tls_private_key_file_config_key) {
-        return Ok(tokio::fs::read(value)
+        return Ok(read_credential_file(config, value, connection)
             .await
-            .map_err(|e| zerror!("Invalid TLS private key file: {}", e))?)
+            .map_err(|e| zerror!(e => "Invalid TLS private key file"))?)
         .and_then(|result| {
             if result.is_empty() {
                 Err(zerror!("Empty TLS key.").into())
@@ -519,6 +596,7 @@ async fn load_tls_certificate(
     tls_certificate_raw_config_key: &str,
     tls_certificate_file_config_key: &str,
     tls_certificate_base64_config_key: &str,
+    connection: &mut Option<OwnedSemaphorePermit>,
 ) -> ZResult<Vec<u8>> {
     if let Some(value) = config.get(tls_certificate_raw_config_key) {
         return Ok(value.as_bytes().to_vec());
@@ -529,9 +607,9 @@ async fn load_tls_certificate(
     }
 
     if let Some(value) = config.get(tls_certificate_file_config_key) {
-        return Ok(tokio::fs::read(value)
+        return Ok(read_credential_file(config, value, connection)
             .await
-            .map_err(|e| zerror!("Invalid TLS certificate file: {}", e))?);
+            .map_err(|e| zerror!(e => "Invalid TLS certificate file"))?);
     }
     Err(zerror!("Missing tls certificates.").into())
 }
@@ -581,8 +659,14 @@ fn load_trust_anchors(config: &Config<'_>) -> ZResult<Option<RootCertStore>> {
     }
 
     if let Some(filename) = config.get(TLS_ROOT_CA_CERTIFICATE_FILE) {
-        let mut pem = BufReader::new(File::open(filename)?);
-        let trust_anchors = process_pem(&mut pem)?;
+        let limit = credential_file_limit(config)?;
+        let file = File::open(filename)?;
+        let trust_anchors = match limit {
+            Some(limit) => {
+                process_pem(&mut Cursor::new(read_bounded_credential_file(file, limit)?))?
+            }
+            None => process_pem(&mut BufReader::new(file))?,
+        };
         root_cert_store.extend(trust_anchors);
         return Ok(Some(root_cert_store));
     }
@@ -661,7 +745,7 @@ R+IdLiXcyIkg0m9N8I17p0ljCSkbrgGMD3bbePRTfg==
                 configuration.get("root_ca_certificate_raw"),
                 expected_certificate
             );
-            let construction = TlsClientConfig::new(&configuration).await;
+            let construction = TlsClientConfig::new(&configuration, &mut None).await;
             let refusal = match construction {
                 Err(refusal) => refusal,
                 Ok(_) => panic!("configured-only outgoing TLS silently loaded public roots"),
@@ -675,7 +759,7 @@ R+IdLiXcyIkg0m9N8I17p0ljCSkbrgGMD3bbePRTfg==
         for selection in ["", "use_public_pki=true"] {
             let endpoint = EndPoint::new("tls", "localhost:7447", "", selection).unwrap();
             let configuration = endpoint.config();
-            let construction = TlsClientConfig::new(&configuration).await;
+            let construction = TlsClientConfig::new(&configuration, &mut None).await;
             assert!(construction.is_ok());
             let roots = outgoing_trust_anchors(&configuration).unwrap();
             assert!(roots.roots == webpki_roots::TLS_SERVER_ROOTS);
@@ -694,7 +778,7 @@ R+IdLiXcyIkg0m9N8I17p0ljCSkbrgGMD3bbePRTfg==
             roots.roots == expected,
             "configured-only outgoing roots included another anchor"
         );
-        let construction = TlsClientConfig::new(&configuration).await;
+        let construction = TlsClientConfig::new(&configuration, &mut None).await;
         assert!(construction.is_ok());
     }
 
@@ -758,8 +842,12 @@ R+IdLiXcyIkg0m9N8I17p0ljCSkbrgGMD3bbePRTfg==
 #[cfg(test)]
 mod tls_pem_tests {
     use std::{
+        fs::{self, File},
         io::{self, BufReader, Cursor, Read},
+        num::NonZeroU32,
         ptr,
+        sync::{mpsc, Arc},
+        time::Duration,
     };
 
     use base64::{engine::general_purpose, Engine};
@@ -769,11 +857,15 @@ mod tls_pem_tests {
         PrivateKeyDer::{Pkcs1, Pkcs8, Sec1},
         TrustAnchor,
     };
+    use tokio::sync::{oneshot, Semaphore, TryAcquireError};
+    use zenoh_config::Config as ZenohConfig;
+    use zenoh_link_commons::ConfigurationInspector;
     use zenoh_protocol::core::EndPoint;
 
     use super::{
-        outgoing_tls_trust_tests::DEPLOYMENT_CA, preferred_private_keys, process_pem,
-        TlsClientConfig, TlsServerConfig,
+        join_credential_read, load_trust_anchors, outgoing_tls_trust_tests::DEPLOYMENT_CA,
+        preferred_private_keys, process_pem, read_bounded_credential_file, TlsClientConfig,
+        TlsConfigurator, TlsServerConfig,
     };
 
     const RSA: &str = "-----BEGIN RSA PRIVATE KEY-----\nAQID\n-----END RSA PRIVATE KEY-----\n";
@@ -804,6 +896,120 @@ AQUFBwMBBggrBgEFBQcDAjAKBggqhkjOPQQDAwNIADBFAiARmqtIYRygkWrMZg6j
 kYikJVUysUelvUMRfljBCbB1jgIhALzl57XtBhJ+QVy5jNMKjU6s9yfCvnzZPTpk
 3Z0eRdp3
 -----END CERTIFICATE-----";
+
+    #[tokio::test]
+    async fn configured_file_limit_preserves_exact_pem_and_refuses_one_extra_byte() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("credential.pem");
+        let mut config = ZenohConfig::default();
+        let configured_file = format!("{file:?}");
+        for name in [
+            "transport/link/tls/listen_private_key",
+            "transport/link/tls/listen_certificate",
+            "transport/link/tls/root_ca_certificate",
+        ] {
+            config.insert_json5(name, &configured_file).unwrap();
+        }
+        let legacy_options = TlsConfigurator.inspect_config(&config).unwrap();
+        let legacy_endpoint = EndPoint::new("tls", "localhost:7447", "", legacy_options).unwrap();
+        let mut pem = DEPLOYMENT_CA.as_bytes().to_vec();
+        pem.resize(65_537, b'\n');
+        fs::write(&file, &pem).unwrap();
+        let legacy = TlsServerConfig::load_tls_certificate(&legacy_endpoint.config()).await;
+        assert_eq!(legacy.unwrap(), pem);
+
+        let mut invalid = config.clone();
+        let zero_limit = invalid.insert_json5("transport/link/tls/max_credential_file_bytes", "0");
+        assert!(zero_limit.is_err());
+
+        config
+            .insert_json5("transport/link/tls/max_credential_file_bytes", "65536")
+            .expect("the configured TLS policy accepts a positive credential file limit");
+        let options = TlsConfigurator.inspect_config(&config).unwrap();
+        let endpoint = EndPoint::new("tls", "localhost:7447", "", options).unwrap();
+        let selected = endpoint.config();
+
+        pem.truncate(65_536);
+        fs::write(&file, &pem).unwrap();
+        let key = TlsServerConfig::load_tls_private_key(&selected).await;
+        let certificate = TlsServerConfig::load_tls_certificate(&selected).await;
+        let roots = load_trust_anchors(&selected);
+
+        pem.push(b'\n');
+        fs::write(&file, &pem).unwrap();
+        let refused_key = TlsServerConfig::load_tls_private_key(&selected).await;
+        let refused_certificate = TlsServerConfig::load_tls_certificate(&selected).await;
+        let refused_roots = load_trust_anchors(&selected);
+        let boundary_refusal = read_bounded_credential_file(
+            File::open(&file).unwrap(),
+            NonZeroU32::new(65_536).unwrap(),
+        );
+        directory.close().unwrap();
+
+        assert_eq!(key.unwrap().as_slice(), &pem[..65_536]);
+        assert_eq!(certificate.unwrap().as_slice(), &pem[..65_536]);
+        assert_eq!(roots.unwrap().unwrap().roots.len(), 1);
+        assert_eq!(
+            boundary_refusal.unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        for refusal in [&refused_key, &refused_certificate] {
+            let source = refusal.as_ref().unwrap_err().source();
+            assert!(source.is_some_and(|source| source.to_string().contains("exceeds 65536 bytes")));
+        }
+        for (name, refusal) in [
+            ("private key", refused_key.err()),
+            ("certificate", refused_certificate.err()),
+            ("roots", refused_roots.err()),
+        ] {
+            let refusal = refusal.unwrap_or_else(|| panic!("accepted oversized {name}"));
+            assert!(
+                refusal
+                    .to_string()
+                    .contains("TLS credential file exceeds 65536 bytes"),
+                "{name} returned an unrelated refusal"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_credential_read_keeps_its_original_connection_slot() {
+        let slots = Arc::new(Semaphore::new(1));
+        let mut connection = Some(Arc::clone(&slots).try_acquire_owned().unwrap());
+        let (announce, started) = oneshot::channel();
+        let (release, held) = mpsc::channel();
+        let mut read = Box::pin(join_credential_read(&mut connection, move || {
+            announce
+                .send(())
+                .map_err(|_| io::Error::other("credential read observer closed"))?;
+            held.recv().map_err(io::Error::other)?;
+            Ok(vec![1, 2, 3])
+        }));
+        let began = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                result = started => result.map_err(io::Error::other),
+                _ = &mut read => Err(io::Error::other("credential read completed before release")),
+            }
+        })
+        .await;
+        drop(read);
+        drop(connection);
+        let busy = Arc::clone(&slots).try_acquire_owned().err();
+        let released = release.send(());
+        let replacement =
+            tokio::time::timeout(Duration::from_secs(5), Arc::clone(&slots).acquire_owned()).await;
+        assert!(matches!(began, Ok(Ok(()))));
+        assert!(released.is_ok());
+        assert_eq!(busy, Some(TryAcquireError::NoPermits));
+        let mut replacement = Some(replacement.unwrap().unwrap());
+        let bytes = join_credential_read(&mut replacement, || Ok(vec![4, 5])).await;
+        let held_after_join = Arc::clone(&slots).try_acquire_owned().err();
+        drop(replacement);
+        let after_drop = slots.try_acquire_owned();
+        assert_eq!(bytes.unwrap(), [4, 5]);
+        assert_eq!(held_after_join, Some(TryAcquireError::NoPermits));
+        assert!(after_drop.is_ok());
+    }
 
     #[test]
     fn process_pem_preserves_complete_ordered_trust_anchors() {
@@ -962,7 +1168,7 @@ kYikJVUysUelvUMRfljBCbB1jgIhALzl57XtBhJ+QVy5jNMKjU6s9yfCvnzZPTpk
             let endpoint = EndPoint::new("tls", "localhost:7447", "", &selection).unwrap();
             let configuration = endpoint.config();
             let server = TlsServerConfig::new(&configuration).await;
-            let client = TlsClientConfig::new(&configuration).await;
+            let client = TlsClientConfig::new(&configuration, &mut None).await;
             let outcomes = [server.map(drop), client.map(drop)];
             match refusals {
                 None => {
@@ -982,7 +1188,7 @@ kYikJVUysUelvUMRfljBCbB1jgIhALzl57XtBhJ+QVy5jNMKjU6s9yfCvnzZPTpk
         let selection = format!("enable_mtls=true;use_public_pki=false;root_ca_certificate_raw=;connect_private_key_raw={MALFORMED};connect_certificate_raw={MALFORMED}");
         let endpoint = EndPoint::new("tls", "localhost:7447", "", &selection).unwrap();
         let configuration = endpoint.config();
-        let actual = TlsClientConfig::new(&configuration).await;
+        let actual = TlsClientConfig::new(&configuration, &mut None).await;
         let refusal = match actual {
             Err(refusal) => refusal,
             Ok(_) => panic!("empty private roots accepted"),

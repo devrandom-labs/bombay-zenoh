@@ -58,9 +58,14 @@ SDK `1.10.13` changes only the controlled transport dependency, to
 `1.10.7`. An outstanding transmit queue retains its original TLS slot
 through close. The settings and public SDK API are unchanged.
 
-Candidate `1.10.14` selects link commons `1.10.3`, TLS link and link
+Published `1.10.14` selects link commons `1.10.3`, TLS link and link
 `1.10.7`, and transport `1.10.8`. TLS listener retirement uses the registered
 bound socket and awaits the original accept loop. The SDK API is unchanged.
+
+Candidate `1.10.15` supports an optional positive
+`transport/link/tls/max_credential_file_bytes` limit for each configured
+TLS credential file. The TLS loader checks the size before PEM parsing.
+If the setting is omitted, file loading retains its previous behavior.
 
 Published `1.10.2` corrects resource registration for valid leading UTF-8 path
 chunks. Published `1.10.3` retires finalized/disconnected native interest resources

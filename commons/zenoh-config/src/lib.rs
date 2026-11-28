@@ -793,6 +793,8 @@ validated_struct::validator! {
                     /// Includes handshakes, active links, and links still owned during close.
                     /// Omission leaves the connection count unrestricted by this setting.
                     max_connections: Option<NonZeroUsize> where (semaphore_limit_validator),
+                    /// Optional byte limit for each TLS key, certificate chain and root file.
+                    max_credential_file_bytes: Option<NonZeroU32>,
                     root_ca_certificate: Option<String>,
                     listen_private_key: Option<String>,
                     listen_certificate: Option<String>,

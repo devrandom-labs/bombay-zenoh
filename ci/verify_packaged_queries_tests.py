@@ -97,7 +97,8 @@ class PackagedQueryEvidence(unittest.TestCase):
     def test_security_candidates_preserve_versions_original_locks_and_registry_edges(self):
         for kind in (ReleaseKind.TLS_SECURITY_SUCCESSOR, ReleaseKind.TLS_INGRESS_SUCCESSOR,
                      ReleaseKind.RECEIVE_BUDGET_SUCCESSOR, ReleaseKind.TLS_LIFETIME_SUCCESSOR,
-                     ReleaseKind.TLS_TRANSMIT_SUCCESSOR, ReleaseKind.TLS_LISTENER_SUCCESSOR):
+                     ReleaseKind.TLS_TRANSMIT_SUCCESSOR, ReleaseKind.TLS_LISTENER_SUCCESSOR,
+                     ReleaseKind.TLS_CREDENTIAL_SUCCESSOR):
             manifest = Path("/tmp/packaged/Cargo.toml")
             owner = {"id": "owner", "manifest_path": str(manifest), "dependencies": []}
             expected_versions = {"zenoh-link-commons": "1.10.2", "zenoh-link-tls": "1.10.3",
@@ -130,6 +131,12 @@ class PackagedQueryEvidence(unittest.TestCase):
                 expected_versions = {"zenoh-link-commons": "1.10.3", "zenoh-link-tls": "1.10.7",
                                      "zenoh-link": "1.10.7", "zenoh-transport": "1.10.8"}
                 expected_sdk = "1.10.14"
+            elif kind is ReleaseKind.TLS_CREDENTIAL_SUCCESSOR:
+                expected_versions = {"zenoh-config": "1.10.5", "zenoh-plugin-trait": "1.10.5",
+                                     "zenoh-link-tls": "1.10.8", "zenoh-link": "1.10.8", "zenoh-transport": "1.10.9"}
+                expected_sdk = "1.10.15"
+                selected = CONFIGURATION_CANDIDATES
+                immutable_owner = "bombay-zenoh-link-commons"
             self.assertEqual(selected - {"zenoh"}, set(expected_versions))
             sdk_version = version("zenoh", kind)
             self.assertEqual(sdk_version, expected_sdk)
@@ -178,14 +185,15 @@ class PackagedQueryEvidence(unittest.TestCase):
 
     def test_source_profiles_refuse_conflicting_release_kinds(self):
         registry_kind = query_release_kind(QuerySourceProfile.REGISTRY, None)
-        self.assertIs(registry_kind, ReleaseKind.TLS_LISTENER_SUCCESSOR)
+        self.assertIs(registry_kind, ReleaseKind.TLS_CREDENTIAL_SUCCESSOR)
         for profile, expected in ((QuerySourceProfile.CONFIGURATION_COHORT, ReleaseKind.CONFIGURATION_SUCCESSOR),
                                   (QuerySourceProfile.TLS_SECURITY_COHORT, ReleaseKind.TLS_SECURITY_SUCCESSOR),
                                   (QuerySourceProfile.TLS_INGRESS_COHORT, ReleaseKind.TLS_INGRESS_SUCCESSOR),
                                   (QuerySourceProfile.RECEIVE_BUDGET_COHORT, ReleaseKind.RECEIVE_BUDGET_SUCCESSOR),
                                   (QuerySourceProfile.TLS_LIFETIME_COHORT, ReleaseKind.TLS_LIFETIME_SUCCESSOR),
                                   (QuerySourceProfile.TLS_TRANSMIT_COHORT, ReleaseKind.TLS_TRANSMIT_SUCCESSOR),
-                                  (QuerySourceProfile.TLS_LISTENER_COHORT, ReleaseKind.TLS_LISTENER_SUCCESSOR)):
+                                  (QuerySourceProfile.TLS_LISTENER_COHORT, ReleaseKind.TLS_LISTENER_SUCCESSOR),
+                                  (QuerySourceProfile.TLS_CREDENTIAL_COHORT, ReleaseKind.TLS_CREDENTIAL_SUCCESSOR)):
             default_kind = query_release_kind(profile, None)
             self.assertIs(default_kind, expected)
             for kind in ReleaseKind:

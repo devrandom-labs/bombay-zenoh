@@ -185,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "bombay-zenoh"
-version = "1.10.14"
+version = "1.10.15"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -234,7 +234,7 @@ dependencies = [
 
 [[package]]
 name = "bombay-zenoh-config"
-version = "1.10.4"
+version = "1.10.5"
 dependencies = [
  "bombay-validated-struct",
  "json5",
@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "bombay-zenoh-link"
-version = "1.10.7"
+version = "1.10.8"
 dependencies = [
  "bombay-zenoh-config",
  "bombay-zenoh-link-commons",
@@ -306,7 +306,7 @@ dependencies = [
 
 [[package]]
 name = "bombay-zenoh-link-tls"
-version = "1.10.7"
+version = "1.10.8"
 dependencies = [
  "async-trait",
  "base64",
@@ -332,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "bombay-zenoh-plugin-trait"
-version = "1.10.4"
+version = "1.10.5"
 dependencies = [
  "bombay-zenoh-config",
  "git-version",
@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "bombay-zenoh-transport"
-version = "1.10.8"
+version = "1.10.9"
 dependencies = [
  "async-trait",
  "bombay-zenoh-config",

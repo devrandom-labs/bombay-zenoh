@@ -710,6 +710,9 @@
       },
       /// Configure TLS specific parameters
       tls: {
+        /// Optional positive byte limit for each TLS key, certificate chain and root file.
+        /// Applies to file sources before their PEM contents are parsed.
+        max_credential_file_bytes: null,
         /// Path to the certificate of the certificate authority used to validate either the server
         /// or the client's keys and certificates, depending on the node's mode. If not specified
         /// on router mode then the default WebPKI certificates are used instead.

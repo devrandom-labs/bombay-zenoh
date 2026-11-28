@@ -109,6 +109,16 @@ with the four exact audited dependency archives. The source gate checks
 retirement of the registered accept loop through the bound socket in both
 profiles, retaining the original accept-loop result.
 
+## TLS credential file successor
+
+`tls-credential-successor` verifies Config and plugin trait `1.10.5`,
+TLS link and link `1.10.8`, transport `1.10.9`, and SDK `1.10.15`.
+Link commons `1.10.3` uses its verified published archive.
+`tls-credential-cohort` uses the six audited candidates and the three
+immutable dependencies. Both TLS owner profiles verify exact-limit
+file loading and the first excess byte, with omission preserving the
+original behavior.
+
 ## Review, merge and publication
 
 The controlled repository starts `main` at the exact upstream base. Corrections
