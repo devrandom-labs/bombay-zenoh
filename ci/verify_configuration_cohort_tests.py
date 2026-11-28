@@ -76,6 +76,12 @@ class ConfigurationCohortEvidence(unittest.TestCase):
                 "bombay-zenoh-link": "1.10.7", "bombay-zenoh-transport": "1.10.8",
                 "bombay-zenoh": "1.10.14",
             })
+        if kind is ReleaseKind.TLS_CREDENTIAL_SUCCESSOR:
+            self.assertEqual({name: archive["version"] for name, archive in ledger.items()}, {
+                "bombay-zenoh-config": "1.10.5", "bombay-zenoh-plugin-trait": "1.10.5",
+                "bombay-zenoh-link-tls": "1.10.8", "bombay-zenoh-link": "1.10.8",
+                "bombay-zenoh-transport": "1.10.9", "bombay-zenoh": "1.10.15",
+            })
         contents, checksums = {}, {}
         for owner in EDGES:
             prefix = identity(owner) + "-" + version(owner, kind)

@@ -87,9 +87,16 @@ follows the transmit queue through close until its final owner releases
 the queue. Config, plugin trait, link and TLS link retain their published
 versions from `1.10.12`.
 
-Candidate SDK `1.10.14` closes a uniquely registered TLS endpoint using its
+Published SDK `1.10.14` closes a uniquely registered TLS endpoint using its
 bound socket, without another hostname lookup. It uses link commons `1.10.3`,
 TLS link and link `1.10.7`, and transport `1.10.8`.
+
+Candidate SDK `1.10.15` adds the optional
+`transport/link/tls/max_credential_file_bytes` setting. When present, it
+bounds each local PEM key, certificate chain and root file before parsing.
+Omission preserves the prior file-loading behavior. Config and plugin trait
+are `1.10.5`, TLS link and link are `1.10.8`, and transport is `1.10.9`.
+Link commons stays at `1.10.3`.
 
 Maintainers run both pinned profiles:
 
